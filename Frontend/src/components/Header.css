@@ -1,0 +1,72 @@
+.header {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+  padding: 25px 0;
+  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.08);
+}
+
+.header-content {
+  max-width: 1450px; 
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+.logo-container {
+  display: flex;
+  justify-content: center;
+  gap: 40px;
+  align-items: center;
+}
+
+/* Wrapper (not super important but keeps spacing consistent) */
+.logo {
+  display: flex;
+  align-items: center;
+}
+
+.logo-icon {
+  width: 450px;         
+  height: 100px;         
+  background: white;
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 16px;   /* ⬅️ better padding */
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.logo-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.Kenya_medical_training_college {
+  transform: scale(1.75);
+  transform-origin: center;
+}
+
+/* Responsive: keep them readable on small screens */
+@media (max-width: 900px) {
+  .logo-container {
+    gap: 18px;
+    flex-wrap: wrap;
+  }
+
+  .logo-icon {
+    width: 240px;
+    height: 70px;
+    padding: 8px 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  .logo-icon {
+    width: 200px;
+    height: 60px;
+  }
+}
