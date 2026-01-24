@@ -12,7 +12,7 @@ function ChatInterface() {
   const [insightsAvailable, setInsightsAvailable] = useState(false);
   const [showCharts, setShowCharts] = useState(false);
 
-  const API_URL = "http://127.0.0.1:8000/query";
+  const API_URL = "https://health-workers-assistant-project.onrender.com/query";
 
   const handleSubmit = async (e) => {
     e.preventDefault();
