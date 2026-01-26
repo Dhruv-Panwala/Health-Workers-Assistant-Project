@@ -1,4 +1,9 @@
 .streamlit/secrets.toml
+
+Backend/__pycache__/
+*.pyc
+Backend/__pycache__/API.cpython-312.pyc
+Backend/__pycache__/New.cpython-312.pyc
 # ===============================
 # Dependencies
 # ===============================
@@ -57,3 +62,5 @@ coverage/
 # ===============================
 .cache/
 .eslintcache
+
+
