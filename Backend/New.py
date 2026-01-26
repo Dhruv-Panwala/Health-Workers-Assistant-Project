@@ -755,30 +755,52 @@ def answer_question(question: str, debug: bool = False) -> dict:
     today_str = date.today().isoformat()
 
     prompt = f"""
-You are given a base query selecting from a CTE named base with columns:
+You are a Text-to-SQL planner for a PostgreSQL database.
+
+You must return ONLY a valid JSON object (no markdown, no explanation, no SQL outside JSON).
+
+You are querying from a CTE named `base` with these columns:
 {columns_list}
 
-Return STRICT JSON only (no SQL, no extra text) with:
-- where_sql: SQL WHERE clause for SELECT * FROM base (omit "WHERE"). Use %s placeholders.
-- params: array of values matching %s placeholders, in order.
-- order_by: "<column> ASC|DESC" using only the columns above.
-- limit: integer row limit (1-{row_limit}).
+Task:
+Generate a JSON plan to fetch RECORDS (detailed rows) from `base`.
 
-Rules:
-- Use only the columns listed.
-- Do not inline user values; use %s placeholders.
-- No semicolons or multiple statements.
-- Interpret relative dates (e.g., "last year") using today's date: {today_str}.
+Return JSON with exactly these keys:
+- where_sql: a SQL boolean expression for filtering rows from `base` (do NOT include the word WHERE).
+- params: array of values corresponding to each %s placeholder in where_sql.
+- order_by: "<column> ASC|DESC" using ONLY allowed columns.
+- limit: integer row limit between 1 and {row_limit}.
 
-Example:
+Hard rules:
+1) Use ONLY the listed columns. Do not invent column names.
+2) Never put user values directly into SQL. Always use %s placeholders.
+3) Do not use semicolons, joins, subqueries, or multiple statements.
+4) Prefer ILIKE for text matching.
+5) If user mentions an organisation/facility/district name, filter using:
+   orgunit_name ILIKE %s
+6) If user mentions a metric/indicator/disease (e.g., malaria, cholera, deaths, tests), filter using:
+   dataelement_name ILIKE %s
+7) If user requests a time period, filter using startdate:
+   startdate >= %s AND startdate < %s
+   Use ISO dates (YYYY-MM-DD).
+8) MUST include all filters mentioned in question.
+9) If user asks “latest/recent”, order by startdate DESC.
+   If user asks “oldest/earliest”, order by startdate ASC.
+10) If the user asks for “top N”, return records but set limit=N and order by value_num DESC when value_num is relevant.
+11) If you are unsure, use where_sql="TRUE" and choose a safe limit.
+
+Today’s date is: {today_str}
+
+Example output:
 {{
-  "where_sql": "orgunit_name ILIKE %s dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
-  "params": ["%Loreto Clinic%","%malaria%", "2023-01-01", "2023-04-01"],
+  "where_sql": "orgunit_name ILIKE %s AND dataelement_name ILIKE %s AND dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
+  "params": ["%Loreto Clinic%", "%malaria%", "%negative%","2016-01-01", "2016-04-01"],
   "order_by": "startdate DESC",
   "limit": 200
 }}
 
-Question: {question}
+User question:
+{question}
 """.strip()
 
     decoded = run_llm_prompt(prompt, hf_token).strip()

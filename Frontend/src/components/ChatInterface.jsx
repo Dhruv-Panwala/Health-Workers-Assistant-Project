@@ -12,17 +12,23 @@ function ChatInterface() {
   const [insightsAvailable, setInsightsAvailable] = useState(false);
   const [showCharts, setShowCharts] = useState(false);
 
-  const API_URL = "https://health-workers-assistant-project.onrender.com/query";
+  // ✅ store last asked question (for UI display)
+  const [currentQuery, setCurrentQuery] = useState("");
+
+  const API_URL = "http://127.0.0.1:8000/query";
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!input.trim()) return;
 
+    const userQuestion = input.trim();
+
+    // ✅ show query above output, but clear input for next query
+    setCurrentQuery(userQuestion);
+
     setLoading(true);
     setError("");
     setResult(null);
-
-    const userQuestion = input;
     setInput("");
 
     try {
@@ -41,16 +47,19 @@ function ChatInterface() {
         throw new Error(data?.detail || "Something went wrong");
       }
 
+      const view = data.view || "records";
+
       setResult({
         question: userQuestion,
-        view: data.view || "records",
+        view,
         columns: data.columns || [],
         rows: data.rows || [],
         row_count: data.row_count ?? (data.rows ? data.rows.length : 0),
       });
 
-      setInsightsAvailable(true);
-      setShowCharts(true);
+      const isSummary = view === "summary";
+      setInsightsAvailable(!isSummary);
+      setShowCharts(!isSummary);
     } catch (err) {
       setError(err.message || "Failed to fetch API");
       setInsightsAvailable(false);
@@ -69,14 +78,32 @@ function ChatInterface() {
 
   // Helper: extract summary values safely
   const getSummaryValue = (label) => {
-    if (!result || !result.columns || !result.rows || result.rows.length === 0) return null;
-    const idx = result.columns.findIndex((c) => c.toLowerCase() === label.toLowerCase());
+    if (!result || !result.columns || !result.rows || result.rows.length === 0)
+      return null;
+    const idx = result.columns.findIndex(
+      (c) => String(c).toLowerCase() === label.toLowerCase()
+    );
     if (idx === -1) return null;
     return result.rows[0]?.[idx];
   };
 
-  const totalValue = result?.view === "summary" ? getSummaryValue("Total") : null;
-  const recordsValue = result?.view === "summary" ? getSummaryValue("Records") : null;
+  const totalValue =
+    result?.view === "summary" ? getSummaryValue("Total") : null;
+  const recordsValue =
+    result?.view === "summary" ? getSummaryValue("Records") : null;
+
+  const formatTotal = (val) => {
+    if (val === null || val === undefined) return "-";
+    const num = Number(val);
+    if (Number.isNaN(num)) return String(val);
+
+    // if it's basically an integer -> show as integer
+    if (Math.abs(num - Math.round(num)) < 0.000001) {
+      return String(Math.round(num));
+    }
+    // else show 2 decimals max
+    return num.toFixed(2);
+  };
 
   return (
     <div className="chat-container">
@@ -98,7 +125,9 @@ function ChatInterface() {
               className="send-button"
               disabled={!input.trim() || loading}
             >
-              {loading ? "..." : (
+              {loading ? (
+                "..."
+              ) : (
                 <svg
                   width="20"
                   height="20"
@@ -117,12 +146,28 @@ function ChatInterface() {
         </form>
 
         {/* MAIN CONTENT AREA */}
-        <div className={`content-grid ${showCharts && insightsAvailable ? "with-insights" : ""}`}>
+        <div
+          className={`content-grid ${
+            showCharts && insightsAvailable ? "with-insights" : ""
+          }`}
+        >
           {/* OUTPUT */}
           <div className="output-section">
             <div className="output-box">
+              {/* ✅ Show the current query nicely */}
+              {currentQuery && (
+                <div className="query-display">
+                  <span className="query-label">Query:</span>
+                  <div className="query-text">{currentQuery}</div>
+                </div>
+              )}
+
               {/* Error */}
-              {error && <div className="error-text">❌ {error}</div>}
+              {error && (
+                <div className="error-text">
+                  Error: Please try another query
+                </div>
+              )}
 
               {/* Loading */}
               {loading && <div className="loading-text">Fetching results...</div>}
@@ -133,17 +178,23 @@ function ChatInterface() {
                   {/* SUMMARY VIEW */}
                   {result.view === "summary" ? (
                     <div className="summary-card">
-                      <div className="summary-item">
-                        <div className="summary-label">Total</div>
-                        <div className="summary-value">
-                          {totalValue === null ? "-" : totalValue.toFixed(3)}
-                        </div>
+                      <div className="summary-title">
+                        Summary Results
                       </div>
 
-                      <div className="summary-item">
-                        <div className="summary-label">Records</div>
-                        <div className="summary-value">
-                          {recordsValue === null ? "-" : recordsValue}
+                      <div className="summary-grid">
+                        <div className="summary-item">
+                          <div className="summary-label">Total recorded</div>
+                          <div className="summary-value">
+                            {formatTotal(totalValue)}
+                          </div>
+                        </div>
+
+                        <div className="summary-item">
+                          <div className="summary-label">Records found</div>
+                          <div className="summary-value">
+                            {recordsValue === null ? "-" : recordsValue}
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -167,7 +218,8 @@ function ChatInterface() {
                                   <tr key={rIdx}>
                                     {result.columns.map((_, cIdx) => (
                                       <td key={cIdx}>
-                                        {row?.[cIdx] === null || row?.[cIdx] === undefined
+                                        {row?.[cIdx] === null ||
+                                        row?.[cIdx] === undefined
                                           ? "-"
                                           : String(row[cIdx])}
                                       </td>
@@ -176,8 +228,12 @@ function ChatInterface() {
                                 ))
                               ) : (
                                 <tr>
-                                  <td colSpan={result.columns.length} style={{ padding: "14px" }}>
-                                    No rows returned yet (but columns are available).
+                                  <td
+                                    colSpan={result.columns.length}
+                                    style={{ padding: "14px" }}
+                                  >
+                                    No rows returned yet (but columns are
+                                    available).
                                   </td>
                                 </tr>
                               )}
@@ -185,7 +241,9 @@ function ChatInterface() {
                           </table>
                         </div>
                       ) : (
-                        <div className="empty-text">No columns returned from API.</div>
+                        <div className="empty-text">
+                          No columns returned from API.
+                        </div>
                       )}
                     </>
                   )}
@@ -202,7 +260,7 @@ function ChatInterface() {
           {/* INSIGHTS */}
           {showCharts && insightsAvailable && (
             <div className="insights-section">
-              <ChartsPanel />
+              <ChartsPanel result={result} currentQuery={currentQuery} />
             </div>
           )}
         </div>

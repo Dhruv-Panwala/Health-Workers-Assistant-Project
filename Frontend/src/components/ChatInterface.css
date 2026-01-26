@@ -105,6 +105,7 @@
   grid-template-columns: 1.7fr 1fr;
 }
 
+/* OUTPUT SECTION */
 .output-section {
   border-radius: 18px;
   overflow: hidden;
@@ -147,6 +148,32 @@
   margin: 0;
 }
 
+/* ✅ QUERY DISPLAY (NEW) */
+.query-display {
+  background: rgba(91, 124, 250, 0.08);
+  border: 1px solid rgba(91, 124, 250, 0.18);
+  padding: 12px 14px;
+  border-radius: 14px;
+  margin-bottom: 14px;
+}
+
+.query-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: rgba(0, 0, 0, 0.55);
+  display: block;
+  margin-bottom: 6px;
+}
+
+.query-text {
+  font-size: 15px;
+  font-weight: 600;
+  color: #2b2b2b;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+/* TABLE */
 .table-wrapper {
   width: 100%;
   overflow: auto;
@@ -213,23 +240,19 @@
   color: rgba(0, 0, 0, 0.65);
 }
 
-.question-preview,
-.rowcount-preview {
-  font-size: 15px;
-  margin-bottom: 10px;
-  color: rgba(0, 0, 0, 0.75);
-}
-
+/* INSIGHTS SECTION */
 .insights-section {
   border-radius: 18px;
-  overflow-y: auto;
+  overflow: hidden; /* ✅ prevent charts scrolling outside */
   border: 1px solid rgba(0, 0, 0, 0.06);
   background: rgba(255, 255, 255, 0.95);
   padding: 12px;
   min-height: 0;
-  scrollbar-width: thin;
+  display: flex;
+  flex-direction: column;
 }
 
+/* INSIGHTS FLOAT BUTTON */
 .insights-float {
   position: absolute;
   bottom: 10px;
@@ -262,6 +285,7 @@
   box-shadow: 0 4px 12px rgba(88, 75, 162, 0.15);
 }
 
+/* TOOLTIP */
 .tooltip-wrapper {
   position: relative;
   display: inline-block;
@@ -289,37 +313,48 @@
   transform: translateY(0px);
 }
 
+/* ✅ SUMMARY CARD (FIXED) */
 .summary-card {
-  display: flex;
-  gap: 14px;
-  margin-top: 12px;
-  flex-wrap: wrap;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 16px;
+  padding: 16px;
+  margin-top: 10px;
+}
+
+.summary-title {
+  font-size: 16px;
+  font-weight: 800;
+  margin-bottom: 12px;
+  color: #2b2b2b;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
 }
 
 .summary-item {
-  flex: 1;
-  min-width: 180px;
-  background: white;
-  border: 1px solid rgba(0, 0, 0, 0.06);
-  border-radius: 16px;
-  padding: 16px 18px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.06);
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 14px;
+  padding: 12px;
 }
 
 .summary-label {
-  font-size: 14px;
-  color: rgba(0, 0, 0, 0.6);
-  margin-bottom: 8px;
+  font-size: 13px;
   font-weight: 600;
+  color: rgba(0, 0, 0, 0.55);
+  margin-bottom: 6px;
 }
 
 .summary-value {
-  font-size: 26px;
+  font-size: 22px;
   font-weight: 800;
   color: #2b2b2b;
 }
 
-
+/* MOBILE */
 @media (max-width: 900px) {
   .chat-container {
     max-width: 100%;
@@ -338,5 +373,9 @@
 
   .output-text {
     font-size: 16px;
+  }
+
+  .summary-grid {
+    grid-template-columns: 1fr;
   }
 }
