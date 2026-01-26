@@ -793,8 +793,8 @@ Today’s date is: {today_str}
 
 Example output:
 {{
-  "where_sql": "orgunit_name ILIKE %s AND dataelement_name ILIKE %s AND dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
-  "params": ["%Loreto Clinic%", "%malaria%", "%negative%","2016-01-01", "2016-04-01"],
+  "where_sql": "orgunit_name ILIKE %s AND dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
+  "params": ["%Loreto Clinic%", "%malaria%", "2016-01-01", "2016-04-01"],
   "order_by": "startdate DESC",
   "limit": 200
 }}
