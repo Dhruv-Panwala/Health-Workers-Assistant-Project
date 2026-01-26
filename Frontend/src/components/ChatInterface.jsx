@@ -12,10 +12,10 @@ function ChatInterface() {
   const [insightsAvailable, setInsightsAvailable] = useState(false);
   const [showCharts, setShowCharts] = useState(false);
 
-  // ✅ store last asked question (for UI display)
+  
   const [currentQuery, setCurrentQuery] = useState("");
 
-  const API_URL = "http://127.0.0.1:8000/query";
+  const API_URL = "https://health-workers-assistant-project.onrender.com/query";
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -23,7 +23,6 @@ function ChatInterface() {
 
     const userQuestion = input.trim();
 
-    // ✅ show query above output, but clear input for next query
     setCurrentQuery(userQuestion);
 
     setLoading(true);
