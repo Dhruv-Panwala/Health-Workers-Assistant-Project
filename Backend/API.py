@@ -21,14 +21,18 @@ app.add_middleware(
 class QueryRequest(BaseModel):
     question: str
     debug: bool = False
-
-@app.get("/")
-def root():
-    return {"status": "ok"}
+    page: int = 1
+    page_size: int = 200
 
 @app.post("/query")
-async def query(req: QueryRequest):
+async def query_endpoint(payload: QueryRequest):
     try:
-        return answer_question(req.question, debug=req.debug)
+        result = answer_question(
+            question=payload.question.strip(),
+            debug=payload.debug,
+            page=payload.page,
+            page_size=payload.page_size
+        )
+        return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=repr(e))
+        return {"detail": str(e)}

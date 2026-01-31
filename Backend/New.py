@@ -490,7 +490,7 @@ def build_where(
 # Query builder & execution
 # ---------------------------------------------------------------------
 
-def build_query(where_sql: str, order_by: str, limit: int) -> str:
+def build_query(where_sql: str, order_by: str) -> str:
     return f"""
 WITH base AS (
     SELECT
@@ -524,8 +524,9 @@ SELECT *
 FROM base
 WHERE {where_sql}
 ORDER BY {order_by}
-LIMIT %s;
+LIMIT %s OFFSET %s
 """
+
 
 def is_summary_question(question: str) -> bool:
     q = question.lower().strip()
@@ -733,7 +734,7 @@ def make_json_safe(obj):
 # CLI main
 # ---------------------------------------------------------------------
 
-def answer_question(question: str, debug: bool = False) -> dict:
+def answer_question(question: str, debug: bool = False, page: int = 1, page_size: int = 200) -> dict:
     row_limit = int(os.environ.get("ROW_LIMIT", "400"))
 
     # DB connection from env
@@ -763,13 +764,29 @@ You are querying from a CTE named `base` with these columns:
 {columns_list}
 
 Task:
-Generate a JSON plan to fetch RECORDS (detailed rows) from `base`.
+Given the user’s question, produce a JSON plan with exactly these keys:
 
-Return JSON with exactly these keys:
-- where_sql: a SQL boolean expression for filtering rows from `base` (do NOT include the word WHERE).
-- params: array of values corresponding to each %s placeholder in where_sql.
-- order_by: "<column> ASC|DESC" using ONLY allowed columns.
-- limit: integer row limit between 1 and {row_limit}.
+- `where_sql`: SQL boolean condition for filtering rows from `base` (do NOT include the word "WHERE").
+- `params`: array of values corresponding to the `%s` placeholders in `where_sql`.
+- `order_by`: one of the base columns + ASC or DESC (e.g., `startdate DESC`). Use only listed columns.
+- `limit`: integer between 1 and {row_limit}.
+
+Follow this reasoning process:
+1. Identify the **metric** or data element (e.g. malaria, deaths, visits).
+   → Use `dataelement_name ILIKE %s` to filter.
+2. Identify the **location or facility** (e.g. district, hospital).
+   → Use `orgunit_name ILIKE %s` to filter.
+3. Identify any **date/time filters** (e.g. last 3 months, in 2016).
+   → Use `startdate >= %s AND startdate < %s` for filtering.
+4. Identify **sorting direction** (e.g. latest → DESC).
+5. Identify any **record limit** (e.g. “top 10 outbreaks” → limit = 10).
+
+Handle these phrases using ISO dates:
+- “last X days” → compute today minus X days to today
+- “last month” → from 1st of previous month to 1st of current month
+- “first 75 days of 2016” → "2016-01-01" to "2016-03-16"
+- “in 2022” → "2022-01-01" to "2023-01-01"
+- “between Jan 2020 and June 2020” → parse both ends into dates
 
 Hard rules:
 1) Use ONLY the listed columns. Do not invent column names.
@@ -791,10 +808,21 @@ Hard rules:
 
 Today’s date is: {today_str}
 
-Example output:
+Example 1:
+User question: "Show records from Loreto Clinic related to malaria cases between Jan to April 2016"
 {{
   "where_sql": "orgunit_name ILIKE %s AND dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
-  "params": ["%Loreto Clinic%", "%malaria%", "2016-01-01", "2016-04-01"],
+  "params": ["%Loreto Clinic%", "%malaria%","2016-01-01", "2016-04-01"],
+  "order_by": "startdate DESC",
+  "limit": 200
+}}
+
+Example 2:
+User question: "Show records of malaria in first 75 days of 2016"
+Output:
+{{
+  "where_sql": "dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
+  "params": ["%malaria%", "2016-01-01", "2016-03-16"],
   "order_by": "startdate DESC",
   "limit": 200
 }}
@@ -817,7 +845,9 @@ User question:
     where_sql = "TRUE"
     params: List[Any] = []
     order_by = "startdate DESC"
-    query_limit = row_limit
+    query_offset = max(0, (page - 1) * page_size)
+    query_limit = page_size
+
 
     # ---------------------------
     # Try LLM plan
@@ -890,8 +920,43 @@ User question:
         )
 
     else:
-        sql = build_query(where_sql, order_by, query_limit)
-        df = run_query(conn_str, sql, params + [query_limit])
+        sql = build_query(where_sql, order_by)
+        df = run_query(conn_str, sql, params + [query_limit, query_offset])
+
+        count_sql = f"""
+            WITH base AS (
+                SELECT
+                    dv.dataelementid,
+                    de.name AS dataelement_name,
+                    de.code AS dataelement_code,
+                    de.uid AS dataelement_uid,
+                    ou.organisationunitid,
+                    ou.name AS orgunit_name,
+                    ou.code AS orgunit_code,
+                    ou.uid AS orgunit_uid,
+                    ou.hierarchylevel,
+                    p.periodid,
+                    p.startdate,
+                    p.enddate,
+                    pt.name AS period_type,
+                    dv.value,
+                    CASE WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$' THEN dv.value::numeric END AS value_num,
+                    dv.comment,
+                    dv.storedby,
+                    dv.lastupdated,
+                    dv.created,
+                    dv.followup
+                FROM datavalue dv
+                JOIN dataelement de ON dv.dataelementid = de.dataelementid
+                JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
+                JOIN period p ON dv.periodid = p.periodid
+                LEFT JOIN periodtype pt ON p.periodtypeid = pt.periodtypeid
+            )
+            SELECT COUNT(*) FROM base WHERE {where_sql};
+            """
+
+        count_df = run_query(conn_str, count_sql, params)
+        total_rows = int(count_df.iloc[0, 0])
         clean_df = make_user_friendly_table(df)
 
     result = {
@@ -899,6 +964,8 @@ User question:
         "columns": list(clean_df.columns),
         "rows": clean_df.values.tolist(),
         "row_count": int(len(clean_df)),
+        "total_count": total_rows,
+
     }
 
     if debug:
@@ -920,7 +987,7 @@ def main():
         raise SystemExit("ERROR: No question provided.")
 
     try:
-        result = answer_question(question, debug=True)
+        result = answer_question(question, debug=True, page=1, page_size=200)
     except Exception as e:
         raise SystemExit(f"ERROR: {e}")
 
