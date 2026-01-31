@@ -129,7 +129,7 @@ function ChatInterface() {
     return Math.abs(num - Math.round(num)) < 0.000001 ? String(Math.round(num)) : num.toFixed(2);
   };
 
-  const paginatedRows = result?.rows.slice((currentPage - 1) * rowsPerPage, currentPage * rowsPerPage);
+  const paginatedRows = result?.rows || [];
   const totalPages = Math.ceil((result?.row_count || 0) / rowsPerPage);
 
   const canGoPrev = currentPage > 1;
