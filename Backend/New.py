@@ -924,36 +924,36 @@ User question:
         df = run_query(conn_str, sql, params + [query_limit, query_offset])
 
         count_sql = f"""
-            WITH base AS (
-                SELECT
-                    dv.dataelementid,
-                    de.name AS dataelement_name,
-                    de.code AS dataelement_code,
-                    de.uid AS dataelement_uid,
-                    ou.organisationunitid,
-                    ou.name AS orgunit_name,
-                    ou.code AS orgunit_code,
-                    ou.uid AS orgunit_uid,
-                    ou.hierarchylevel,
-                    p.periodid,
-                    p.startdate,
-                    p.enddate,
-                    pt.name AS period_type,
-                    dv.value,
-                    CASE WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$' THEN dv.value::numeric END AS value_num,
-                    dv.comment,
-                    dv.storedby,
-                    dv.lastupdated,
-                    dv.created,
-                    dv.followup
-                FROM datavalue dv
-                JOIN dataelement de ON dv.dataelementid = de.dataelementid
-                JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
-                JOIN period p ON dv.periodid = p.periodid
-                LEFT JOIN periodtype pt ON p.periodtypeid = pt.periodtypeid
-            )
-            SELECT COUNT(*) FROM base WHERE {where_sql};
-            """
+WITH base AS (
+    SELECT
+        dv.dataelementid,
+        de.name AS dataelement_name,
+        de.code AS dataelement_code,
+        de.uid AS dataelement_uid,
+        ou.organisationunitid,
+        ou.name AS orgunit_name,
+        ou.code AS orgunit_code,
+        ou.uid AS orgunit_uid,
+        ou.hierarchylevel,
+        p.periodid,
+        p.startdate,
+        p.enddate,
+        pt.name AS period_type,
+        dv.value,
+        CASE WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$' THEN dv.value::numeric END AS value_num,
+        dv.comment,
+        dv.storedby,
+        dv.lastupdated,
+        dv.created,
+        dv.followup
+    FROM datavalue dv
+    JOIN dataelement de ON dv.dataelementid = de.dataelementid
+    JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
+    JOIN period p ON dv.periodid = p.periodid
+    LEFT JOIN periodtype pt ON p.periodtypeid = pt.periodtypeid
+)
+SELECT COUNT(*) FROM base WHERE {where_sql};
+"""
 
         count_df = run_query(conn_str, count_sql, params)
         total_rows = int(count_df.iloc[0, 0])
