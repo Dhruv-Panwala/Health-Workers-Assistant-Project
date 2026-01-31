@@ -13,7 +13,7 @@ function ChatInterface() {
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage] = useState(200);
 
-  const API_URL = "http://127.0.0.1:8000/query";
+  const API_URL = "https://health-workers-assistant-project.onrender.com/query";
 
   const handleSubmit = async (e) => {
     e.preventDefault();
