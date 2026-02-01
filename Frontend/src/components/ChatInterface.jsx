@@ -66,7 +66,7 @@ function ChatInterface() {
   };
 
   useEffect(() => {
-  if (!currentQuery || currentPage === 1) return;
+  if (!currentQuery) return;
 
   const fetchPage = async () => {
     setLoading(true);
@@ -92,17 +92,18 @@ function ChatInterface() {
       setResult(prev => ({
         ...prev,
         rows: data.rows || [],
-        row_count: data.total_count || data.row_count || (data.rows ? data.rows.length : 0),
+        row_count: data.row_count,   // IMPORTANT
       }));
     } catch (err) {
       setError(err.message || "Failed to fetch API");
     } finally {
       setLoading(false);
     }
-    };
+  };
 
-    fetchPage();
-  }, [currentPage]);
+  fetchPage();
+  }, [currentQuery, currentPage]);
+
 
 
   const handleKeyDown = (e) => {

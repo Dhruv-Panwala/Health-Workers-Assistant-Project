@@ -963,9 +963,7 @@ SELECT COUNT(*) FROM base WHERE {where_sql};
         "view": "summary" if summary_mode else "records",
         "columns": list(clean_df.columns),
         "rows": clean_df.values.tolist(),
-        "row_count": int(len(clean_df)),
-        "total_count": total_rows,
-
+        "row_count": total_rows,
     }
 
     if debug:
