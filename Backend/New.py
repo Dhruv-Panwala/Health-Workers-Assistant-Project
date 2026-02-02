@@ -13,6 +13,7 @@ import psycopg2
 from dateutil import parser as dateutil_parser
 from openai import OpenAI
 from dotenv import load_dotenv
+from functools import lru_cache
 load_dotenv()
 
 HF_TOKEN_FALLBACK = ""  # Optional: paste token here for local-only use.
@@ -544,40 +545,82 @@ def build_summary_query(where_sql: str) -> str:
     We prefer SUM(value_num). If value_num is null, SUM ignores nulls.
     """
     return f"""
-WITH base AS (
+    WITH base AS (
+        SELECT
+            dv.dataelementid,
+            de.name AS dataelement_name,
+            de.code AS dataelement_code,
+            de.uid AS dataelement_uid,
+            ou.organisationunitid,
+            ou.name AS orgunit_name,
+            ou.code AS orgunit_code,
+            ou.uid AS orgunit_uid,
+            ou.hierarchylevel,
+            p.periodid,
+            p.startdate,
+            p.enddate,
+            pt.name AS period_type,
+            dv.value,
+            CASE WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$' THEN dv.value::numeric END AS value_num,
+            dv.comment,
+            dv.storedby,
+            dv.lastupdated,
+            dv.created,
+            dv.followup
+        FROM datavalue dv
+        JOIN dataelement de ON dv.dataelementid = de.dataelementid
+        JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
+        JOIN period p ON dv.periodid = p.periodid
+        LEFT JOIN periodtype pt ON p.periodtypeid = pt.periodtypeid
+    )
     SELECT
-        dv.dataelementid,
-        de.name AS dataelement_name,
-        de.code AS dataelement_code,
-        de.uid AS dataelement_uid,
-        ou.organisationunitid,
-        ou.name AS orgunit_name,
-        ou.code AS orgunit_code,
-        ou.uid AS orgunit_uid,
-        ou.hierarchylevel,
-        p.periodid,
-        p.startdate,
-        p.enddate,
-        pt.name AS period_type,
-        dv.value,
-        CASE WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$' THEN dv.value::numeric END AS value_num,
-        dv.comment,
-        dv.storedby,
-        dv.lastupdated,
-        dv.created,
-        dv.followup
-    FROM datavalue dv
-    JOIN dataelement de ON dv.dataelementid = de.dataelementid
-    JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
-    JOIN period p ON dv.periodid = p.periodid
-    LEFT JOIN periodtype pt ON p.periodtypeid = pt.periodtypeid
-)
-SELECT
-    COALESCE(SUM(value_num), 0) AS total_value,
-    COUNT(*) AS record_count
-FROM base
-WHERE {where_sql};
-""".strip()
+        COALESCE(SUM(value_num), 0) AS total_value,
+        COUNT(*) AS record_count
+    FROM base
+    WHERE {where_sql};
+    """.strip()
+
+def build_chart_query(where_sql: str) -> str:
+    """
+    Returns aggregated data for charts (NO pagination).
+    """
+    return f"""
+    WITH base AS (
+        SELECT
+            dv.dataelementid,
+            de.name AS dataelement_name,
+            de.code AS dataelement_code,
+            de.uid AS dataelement_uid,
+            ou.organisationunitid,
+            ou.name AS orgunit_name,
+            ou.code AS orgunit_code,
+            ou.uid AS orgunit_uid,
+            ou.hierarchylevel,
+            p.periodid,
+            p.startdate,
+            p.enddate,
+            pt.name AS period_type,
+            dv.value,
+            CASE WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$' THEN dv.value::numeric END AS value_num,
+            dv.comment,
+            dv.storedby,
+            dv.lastupdated,
+            dv.created,
+            dv.followup
+        FROM datavalue dv
+        JOIN dataelement de ON dv.dataelementid = de.dataelementid
+        JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
+        JOIN period p ON dv.periodid = p.periodid
+        LEFT JOIN periodtype pt ON p.periodtypeid = pt.periodtypeid
+    )
+    SELECT
+        orgunit_name,
+        dataelement_name,
+        SUM(value_num) AS total_value
+    FROM base
+    WHERE {where_sql}
+    GROUP BY orgunit_name, dataelement_name;
+    """.strip()
 
 
 def run_query(conn_str: str, sql: str, params: List[Any]) -> pd.DataFrame:
@@ -677,10 +720,6 @@ def make_user_friendly_table(df: pd.DataFrame) -> pd.DataFrame:
     return clean
 
 
-# ---------------------------------------------------------------------
-# Small helpers
-# ---------------------------------------------------------------------
-
 def mentions_value(question: str) -> bool:
     return bool(
         re.search(
@@ -717,7 +756,6 @@ def make_json_safe(obj):
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
 
-    # normal python float NaN/inf
     if isinstance(obj, float):
         if math.isnan(obj) or math.isinf(obj):
             return None
@@ -730,11 +768,132 @@ def make_json_safe(obj):
 
     return obj
 
+def build_insights(where_sql:str,conn_str: str, params: List[Any]):
+    chart_sql = build_chart_query(where_sql)
+    chart_df = run_query(conn_str, chart_sql, params)
+    insights = {}
+    if not chart_df.empty:
+        unique_orgs = chart_df["orgunit_name"].nunique()
+        unique_metrics = chart_df["dataelement_name"].nunique()
+
+        if unique_orgs > 1:
+            top = (
+                chart_df.groupby("orgunit_name")["total_value"]
+                    .sum()
+                    .sort_values(ascending=False)
+                    .head(10)
+                    .reset_index()
+                )
+            insights["mode"] = "top_orgs"
+            insights["data"] = [
+                    {"name": r["orgunit_name"], "total": float(r["total_value"])}
+                    for _, r in top.iterrows()
+                ]
+
+        elif unique_metrics > 1:
+            top = (
+                chart_df.groupby("dataelement_name")["total_value"]
+                    .sum()
+                    .sort_values(ascending=False)
+                    .head(10)
+                    .reset_index()
+                )
+            insights["mode"] = "top_metrics"
+            insights["data"] = [
+                    {"name": r["dataelement_name"], "total": float(r["total_value"])}
+                    for _, r in top.iterrows()
+                ]
+
+        else:
+            insights["mode"] = "none"
+    return insights
+
+def count_total_rows(where_sql:str,conn_str: str, params: List[Any]):
+    count_sql = f"""
+                WITH base AS (
+                    SELECT
+                        dv.dataelementid,
+                        de.name AS dataelement_name,
+                        de.code AS dataelement_code,
+                        de.uid AS dataelement_uid,
+                        ou.organisationunitid,
+                        ou.name AS orgunit_name,
+                        ou.code AS orgunit_code,
+                        ou.uid AS orgunit_uid,
+                        ou.hierarchylevel,
+                        p.periodid,
+                        p.startdate,
+                        p.enddate,
+                        pt.name AS period_type,
+                        dv.value,
+                        CASE WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$' THEN dv.value::numeric END AS value_num,
+                        dv.comment,
+                        dv.storedby,
+                        dv.lastupdated,
+                        dv.created,
+                        dv.followup
+                    FROM datavalue dv
+                    JOIN dataelement de ON dv.dataelementid = de.dataelementid
+                    JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
+                    JOIN period p ON dv.periodid = p.periodid
+                    LEFT JOIN periodtype pt ON p.periodtypeid = pt.periodtypeid
+                )
+                SELECT COUNT(*) FROM base WHERE {where_sql};
+                """
+
+    count_df = run_query(conn_str, count_sql, params)
+    total_rows = int(count_df.iloc[0, 0])
+    return total_rows
+
+def preheat_database(conn_str: str):
+    """
+    A very small warm-up query to force PostgreSQL to load table metadata,
+    cached plans, and buffer pages into memory.
+    """
+    warm_sql = """
+        WITH base AS (
+            SELECT dv.periodid, dv.dataelementid
+            FROM datavalue dv
+            LIMIT 50
+        )
+        SELECT COUNT(*) FROM base;
+    """
+    try:
+        with psycopg2.connect(conn_str) as conn:
+            with conn.cursor() as cur:
+                cur.execute(warm_sql)
+    except Exception as e:
+        print("⚠️ Database preheat skipped:", e)
+
+
+@lru_cache(maxsize=300)
+def get_cached_llm_plan(prompt: str, token: str) -> dict:
+    """
+    Calls the LLM once and caches the generated SQL plan.
+    Subsequent identical questions reuse cached result.
+    Removes repeated LLM latency during:
+      - insights fetch
+      - pagination
+      - re-renders
+    """
+    decoded = run_llm_prompt(prompt, token).strip()
+
+    instr = {}
+    m = re.search(r"\{[\s\S]*\}", decoded)
+    if m:
+        try:
+            instr = json.loads(m.group())
+        except Exception:
+            instr = {}
+
+    return instr
+
+
 # ---------------------------------------------------------------------
 # CLI main
 # ---------------------------------------------------------------------
 
-def answer_question(question: str, debug: bool = False, page: int = 1, page_size: int = 200) -> dict:
+def answer_question(question: str, debug: bool = False, page: int = 1, page_size: int = 100, include_insights: bool=False, include_rows:bool=True) -> dict:
     row_limit = int(os.environ.get("ROW_LIMIT", "400"))
 
     # DB connection from env
@@ -756,82 +915,85 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     today_str = date.today().isoformat()
 
     prompt = f"""
-You are a Text-to-SQL planner for a PostgreSQL database.
+    You are a Text-to-SQL planner for a PostgreSQL database.
 
-You must return ONLY a valid JSON object (no markdown, no explanation, no SQL outside JSON).
+    You must return ONLY a valid JSON object (no markdown, no explanation, no SQL outside JSON).
 
-You are querying from a CTE named `base` with these columns:
-{columns_list}
+    You are querying from a CTE named `base` with these columns:
+    {columns_list}
 
-Task:
-Given the user’s question, produce a JSON plan with exactly these keys:
+    Task:
+    Given the user’s question, produce a JSON plan with exactly these keys:
 
-- `where_sql`: SQL boolean condition for filtering rows from `base` (do NOT include the word "WHERE").
-- `params`: array of values corresponding to the `%s` placeholders in `where_sql`.
-- `order_by`: one of the base columns + ASC or DESC (e.g., `startdate DESC`). Use only listed columns.
-- `limit`: integer between 1 and {row_limit}.
+    - `where_sql`: SQL boolean condition for filtering rows from `base` (do NOT include the word "WHERE").
+    - `params`: array of values corresponding to the `%s` placeholders in `where_sql`.
+    - `order_by`: one of the base columns + ASC or DESC (e.g., `startdate DESC`). Use only listed columns.
+    - `limit`: integer between 1 and {row_limit}.
 
-Follow this reasoning process:
-1. Identify the **metric** or data element (e.g. malaria, deaths, visits).
-   → Use `dataelement_name ILIKE %s` to filter.
-2. Identify the **location or facility** (e.g. district, hospital).
-   → Use `orgunit_name ILIKE %s` to filter.
-3. Identify any **date/time filters** (e.g. last 3 months, in 2016).
-   → Use `startdate >= %s AND startdate < %s` for filtering.
-4. Identify **sorting direction** (e.g. latest → DESC).
-5. Identify any **record limit** (e.g. “top 10 outbreaks” → limit = 10).
+    Follow this reasoning process:
+    1. Identify the **metric** or data element (e.g. malaria, deaths, visits).
+    → Use `dataelement_name ILIKE %s` to filter.
+    2. Identify the **location or facility** (e.g. district, hospital).
+    → Use `orgunit_name ILIKE %s` to filter.
+    3. Identify any **date/time filters** (e.g. last 3 months, in 2016).
+    → Use `startdate >= %s AND startdate < %s` for filtering.
+    4. Identify **sorting direction** (e.g. latest → DESC).
+    5. Identify any **record limit** (e.g. “top 10 outbreaks” → limit = 10).
 
-Handle these phrases using ISO dates:
-- “last X days” → compute today minus X days to today
-- “last month” → from 1st of previous month to 1st of current month
-- “first 75 days of 2016” → "2016-01-01" to "2016-03-16"
-- “in 2022” → "2022-01-01" to "2023-01-01"
-- “between Jan 2020 and June 2020” → parse both ends into dates
+    Handle these phrases using ISO dates:
+    - “last X days” → compute today minus X days to today
+    - “last month” → from 1st of previous month to 1st of current month
+    - “first 75 days of 2016” → "2016-01-01" to "2016-03-16"
+    - “in 2022” → "2022-01-01" to "2023-01-01"
+    - “between Jan 2020 and June 2020” → parse both ends into dates
 
-Hard rules:
-1) Use ONLY the listed columns. Do not invent column names.
-2) Never put user values directly into SQL. Always use %s placeholders.
-3) Do not use semicolons, joins, subqueries, or multiple statements.
-4) Prefer ILIKE for text matching.
-5) If user mentions an organisation/facility/district name, filter using:
-   orgunit_name ILIKE %s
-6) If user mentions a metric/indicator/disease (e.g., malaria, cholera, deaths, tests), filter using:
-   dataelement_name ILIKE %s
-7) If user requests a time period, filter using startdate:
-   startdate >= %s AND startdate < %s
-   Use ISO dates (YYYY-MM-DD).
-8) MUST include all filters mentioned in question.
-9) If user asks “latest/recent”, order by startdate DESC.
-   If user asks “oldest/earliest”, order by startdate ASC.
-10) If the user asks for “top N”, return records but set limit=N and order by value_num DESC when value_num is relevant.
-11) If you are unsure, use where_sql="TRUE" and choose a safe limit.
+    Hard rules:
+    1) Use ONLY the listed columns. Do not invent column names.
+    2) Never put user values directly into SQL. Always use %s placeholders.
+    3) Do not use semicolons, joins, subqueries, or multiple statements.
+    4) Prefer ILIKE for text matching.
+    5) If user mentions an organisation/facility/district name, filter using:
+    orgunit_name ILIKE %s
+    6) If user mentions a metric/indicator/disease (e.g., malaria, cholera, deaths, tests), filter using:
+    dataelement_name ILIKE %s
+    7) If user requests a time period, filter using startdate:
+    startdate >= %s AND startdate < %s
+    Use ISO dates (YYYY-MM-DD).
+    8) MUST include all filters mentioned in question.
+    9) If user asks “latest/recent”, order by startdate DESC.
+    If user asks “oldest/earliest”, order by startdate ASC.
+    10) If the user asks for “top N”, return records but set limit=N and order by value_num DESC when value_num is relevant.
+    11) If you are unsure, use where_sql="TRUE" and choose a safe limit.
 
-Today’s date is: {today_str}
+    Today’s date is: {today_str}
 
-Example 1:
-User question: "Show records from Loreto Clinic related to malaria cases between Jan to April 2016"
-{{
-  "where_sql": "orgunit_name ILIKE %s AND dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
-  "params": ["%Loreto Clinic%", "%malaria%","2016-01-01", "2016-04-01"],
-  "order_by": "startdate DESC",
-  "limit": 200
-}}
+    Example 1:
+    User question: "Show records from Loreto Clinic related to malaria cases between Jan to April 2016"
+    {{
+    "where_sql": "orgunit_name ILIKE %s AND dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
+    "params": ["%Loreto Clinic%", "%malaria%","2016-01-01", "2016-04-01"],
+    "order_by": "startdate DESC",
+    "limit": 200
+    }}
 
-Example 2:
-User question: "Show records of malaria in first 75 days of 2016"
-Output:
-{{
-  "where_sql": "dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
-  "params": ["%malaria%", "2016-01-01", "2016-03-16"],
-  "order_by": "startdate DESC",
-  "limit": 200
-}}
+    Example 2:
+    User question: "Show records of malaria in first 75 days of 2016"
+    Output:
+    {{
+    "where_sql": "dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
+    "params": ["%malaria%", "2016-01-01", "2016-03-16"],
+    "order_by": "startdate DESC",
+    "limit": 200
+    }}
 
-User question:
-{question}
-""".strip()
+    User question:
+    {question}
+    """.strip()
 
-    decoded = run_llm_prompt(prompt, hf_token).strip()
+    instr = get_cached_llm_plan(prompt, hf_token)
+    decoded = json.dumps(instr)  # only for debug compatibility
+
+
 
     instr: Dict[str, Any] = {}
     m = re.search(r"\{[\s\S]*\}", decoded)
@@ -910,6 +1072,7 @@ User question:
     if summary_mode:
         sql = build_summary_query(where_sql)
         df = run_query(conn_str, sql, params)
+
         clean_df = df.copy()
 
         clean_df = clean_df.rename(
@@ -919,52 +1082,30 @@ User question:
             }
         )
 
+        if "Total" in clean_df.columns:
+            clean_df["Total"] = clean_df["Total"].fillna(0).astype(int)
+
+        if "Records" in clean_df.columns:
+            clean_df["Records"] = clean_df["Records"].fillna(0).astype(int)
+
     else:
-        sql = build_query(where_sql, order_by)
-        df = run_query(conn_str, sql, params + [query_limit, query_offset])
+        if include_rows:
+            sql = build_query(where_sql, order_by)
+            df = run_query(conn_str, sql, params + [query_limit, query_offset])
+            clean_df = make_user_friendly_table(df)
 
-        count_sql = f"""
-WITH base AS (
-    SELECT
-        dv.dataelementid,
-        de.name AS dataelement_name,
-        de.code AS dataelement_code,
-        de.uid AS dataelement_uid,
-        ou.organisationunitid,
-        ou.name AS orgunit_name,
-        ou.code AS orgunit_code,
-        ou.uid AS orgunit_uid,
-        ou.hierarchylevel,
-        p.periodid,
-        p.startdate,
-        p.enddate,
-        pt.name AS period_type,
-        dv.value,
-        CASE WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$' THEN dv.value::numeric END AS value_num,
-        dv.comment,
-        dv.storedby,
-        dv.lastupdated,
-        dv.created,
-        dv.followup
-    FROM datavalue dv
-    JOIN dataelement de ON dv.dataelementid = de.dataelementid
-    JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
-    JOIN period p ON dv.periodid = p.periodid
-    LEFT JOIN periodtype pt ON p.periodtypeid = pt.periodtypeid
-)
-SELECT COUNT(*) FROM base WHERE {where_sql};
-"""
+        if include_insights:
+            insights=build_insights(where_sql,conn_str,params)
+            total_rows=count_total_rows(where_sql,conn_str,params)
 
-        count_df = run_query(conn_str, count_sql, params)
-        total_rows = int(count_df.iloc[0, 0])
-        clean_df = make_user_friendly_table(df)
-
-    result = {
-        "view": "summary" if summary_mode else "records",
-        "columns": list(clean_df.columns),
-        "rows": clean_df.values.tolist(),
-        "row_count": total_rows,
-    }
+        
+    if summary_mode or include_rows:
+        result = {
+            "view": "summary" if summary_mode else "records",
+            "columns": list(clean_df.columns),
+            "rows": clean_df.values.tolist(),
+            "insights_available": False if summary_mode else True
+        }
 
     if debug:
         result["debug"] = {
@@ -977,6 +1118,15 @@ SELECT COUNT(*) FROM base WHERE {where_sql};
             "raw_columns": list(df.columns),
         }
 
+    if include_insights and not summary_mode:
+        result = {
+            "view": "records",
+            "columns": [],
+            "rows": [],
+        }
+        result["row_count"]= total_rows
+        result["insights"] = insights
+        
     return make_json_safe(result)
 
 def main():
