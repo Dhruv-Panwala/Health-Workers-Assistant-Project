@@ -11,14 +11,12 @@ async def lifespan(app: FastAPI):
     # Startup phase
     conn_str = os.environ.get("DHIS2_DSN", "").strip() or build_conn_str_from_parts()
     if conn_str:
-        print("🔥 Preheating PostgreSQL…")
         preheat_database(conn_str)
 
     yield  # ⇦ FastAPI will start serving API after this line
 
     # Shutdown phase (optional cleanup)
-    print("🛑 API shutting down…")
-
+    
 app = FastAPI(lifespan=lifespan)
 
 

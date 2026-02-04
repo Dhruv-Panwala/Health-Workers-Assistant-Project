@@ -16,6 +16,7 @@ function ChatInterface() {
   const [currentQuery, setCurrentQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage] = useState(100);
+  const pageAbortRef = useRef(null);
 
   const API_URL = "https://health-workers-assistant-project.onrender.com/query";
 
@@ -67,7 +68,7 @@ function ChatInterface() {
         view: data.view || "records",
         columns: data.columns || [],
         rows: data.rows || [],
-        row_count: data.row_count ?? data.rows.length,
+        row_count: data.row_count ?? (data.rows ? data.rows.length : 0),
         insights: null
       });
       // Only fetch insights for records mode
@@ -124,63 +125,73 @@ function ChatInterface() {
     }
   };
 
-  //
   // Pagination Handling — preserves insights and only replaces rows
-  //
-  useEffect(() => {
-    if (!currentQuery) return;
-    const activeQuery = currentQuery;
+useEffect(() => {
+  if (!currentQuery) return;
 
-    const fetchPage = async () => {
-      setLoadingTable(true);
-      setError("");
+  const controller = new AbortController();
 
-      try {
-        const res = await fetch(API_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            question: currentQuery,
-            debug: false,
-            page: currentPage,
-            page_size: rowsPerPage,
-            include_rows: true,
-            include_insights: false
-          }),
-        });
+  // cancel previous request immediately
+  if (pageAbortRef.current) {
+    pageAbortRef.current.abort();
+  }
 
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.detail || "Something went wrong");
+  pageAbortRef.current = controller;
 
-        // discard stale pagination responses
-        if (lastQueryRef.current !== activeQuery) return;
+  const fetchPage = async () => {
+    setLoadingTable(true);
+    setError("");
 
-        setResult((prev) =>
-          prev
-            ? {
-                ...prev,
-                rows: data.rows || [],
-                // row_count stays as-is (never replaced by pagination fetch)
-              }
-            : prev
-        );
-      } catch (err) {
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,   // ⭐ important
+        body: JSON.stringify({
+          question: currentQuery,
+          debug: false,
+          page: currentPage,
+          page_size: rowsPerPage,
+          include_rows: true,
+          include_insights: false
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.detail || "Something went wrong");
+
+      setResult(prev =>
+        prev
+          ? {
+              ...prev,
+              rows: data.rows || [],
+              row_count: data.row_count ?? prev.row_count,
+            }
+          : prev
+      );
+
+    } catch (err) {
+      // ignore aborted requests
+      if (err.name !== "AbortError") {
         setError(err.message || "Failed to fetch API");
-      } finally {
-        if (lastQueryRef.current === activeQuery) {
-          setLoadingTable(false);
-        }
       }
-    };
+    } finally {
+      setLoadingTable(false);
+    }
+  };
 
-    fetchPage();
-  }, [currentPage]);
+  fetchPage();
+
+  // cleanup on page change/unmount
+  return () => controller.abort();
+
+}, [currentQuery, currentPage]);
 
   //
   // UI utilities
   //
 
-  const paginatedRows = result?.rows || [];
+  const paginatedRows = Array.isArray(result?.rows) ? result.rows : [];
   const totalPages = Math.ceil((result?.row_count || 0) / rowsPerPage);
 
   const canGoPrev = currentPage > 1;
@@ -228,7 +239,7 @@ function ChatInterface() {
               {loadingTable && <div className="loading-text">Fetching results...</div>}
 
               {!loadingTable && result && (
-                result.columns.length > 0 ? (
+                ((result?.columns?.length || 0)>0) ? (
                   <div className="table-wrapper">
                     <table className="result-table">
                       <thead>
@@ -241,7 +252,11 @@ function ChatInterface() {
                           paginatedRows.map((row, rIdx) => (
                             <tr key={rIdx}>
                               {result.columns.map((_, cIdx) => (
-                                <td key={cIdx}>{row[cIdx] ?? "-"}</td>
+                                <td key={cIdx}>
+                                  {row[cIdx] === null || row[cIdx] === undefined
+                                    ? "-"
+                                    : String(row[cIdx])}
+                                </td>
                               ))}
                             </tr>
                           ))

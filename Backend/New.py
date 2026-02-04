@@ -514,7 +514,7 @@ WITH base AS (
         dv.storedby,
         dv.lastupdated,
         dv.created,
-        dv.followup
+        COALESCE(dv.followup, FALSE) AS followup
     FROM datavalue dv
     JOIN dataelement de ON dv.dataelementid = de.dataelementid
     JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
@@ -566,7 +566,7 @@ def build_summary_query(where_sql: str) -> str:
             dv.storedby,
             dv.lastupdated,
             dv.created,
-            dv.followup
+            COALESCE(dv.followup, FALSE) AS followup
         FROM datavalue dv
         JOIN dataelement de ON dv.dataelementid = de.dataelementid
         JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
@@ -606,7 +606,7 @@ def build_chart_query(where_sql: str) -> str:
             dv.storedby,
             dv.lastupdated,
             dv.created,
-            dv.followup
+            COALESCE(dv.followup, FALSE) AS followup
         FROM datavalue dv
         JOIN dataelement de ON dv.dataelementid = de.dataelementid
         JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
@@ -803,7 +803,6 @@ def build_insights(where_sql:str,conn_str: str, params: List[Any]):
                     {"name": r["dataelement_name"], "total": float(r["total_value"])}
                     for _, r in top.iterrows()
                 ]
-
         else:
             insights["mode"] = "none"
     return insights
@@ -831,7 +830,7 @@ def count_total_rows(where_sql:str,conn_str: str, params: List[Any]):
                         dv.storedby,
                         dv.lastupdated,
                         dv.created,
-                        dv.followup
+                        COALESCE(dv.followup, FALSE) AS followup
                     FROM datavalue dv
                     JOIN dataelement de ON dv.dataelementid = de.dataelementid
                     JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
@@ -931,14 +930,15 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     - `limit`: integer between 1 and {row_limit}.
 
     Follow this reasoning process:
-    1. Identify the **metric** or data element (e.g. malaria, deaths, visits).
+    1. Identify the **metric** or data element (e.g. malaria, malaria positve, deaths, visits).Metric is OPTIONAL. If the user does NOT explicitly mention a disease/indicator/metric, DO NOT add any dataelement_name filter. Never guess or invent a metric. Never guess or infer a metric from numbers or dates. Years (e.g., 2015) are NOT metrics.
     → Use `dataelement_name ILIKE %s` to filter.
-    2. Identify the **location or facility** (e.g. district, hospital).
-    → Use `orgunit_name ILIKE %s` to filter.
+    2. Identify the **facility** by name (e.g. Red Cross Clinic, Ngelehun CHC). If multiple facilities are mentioned, you MUST include ALL of them. Never drop any facility. Create one ILIKE placeholder per facility and combine using OR.
+    → Use `orgunit_name ILIKE %s` to per facility and combine using OR.
     3. Identify any **date/time filters** (e.g. last 3 months, in 2016).
     → Use `startdate >= %s AND startdate < %s` for filtering.
-    4. Identify **sorting direction** (e.g. latest → DESC).
-    5. Identify any **record limit** (e.g. “top 10 outbreaks” → limit = 10).
+    4. Identify follow-up status intent phrases meaning completed/maintained/flagged/reviewed → followup IS TRUE while phrases meaning not followed up/pending/unresolved/missing → followup IS FALSE
+    -> if mentioned, include filter: followup = %s
+    5. Identify **sorting direction** (e.g. latest → DESC).
 
     Handle these phrases using ISO dates:
     - “last X days” → compute today minus X days to today
@@ -952,18 +952,26 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     2) Never put user values directly into SQL. Always use %s placeholders.
     3) Do not use semicolons, joins, subqueries, or multiple statements.
     4) Prefer ILIKE for text matching.
-    5) If user mentions an organisation/facility/district name, filter using:
-    orgunit_name ILIKE %s
-    6) If user mentions a metric/indicator/disease (e.g., malaria, cholera, deaths, tests), filter using:
-    dataelement_name ILIKE %s
+    5) If user mentions an organisation/facility/district name, filter using: orgunit_name ILIKE %s
+    6) If user mentions a metric/indicator/disease (e.g., malaria, cholera, deaths, tests), filter using: dataelement_name ILIKE %s
     7) If user requests a time period, filter using startdate:
     startdate >= %s AND startdate < %s
     Use ISO dates (YYYY-MM-DD).
-    8) MUST include all filters mentioned in question.
-    9) If user asks “latest/recent”, order by startdate DESC.
+    8)If the question references follow-up status in any way,
+    use the column: followup = %s
+    (TRUE or FALSE based on intent)
+    9) MUST include all filters mentioned in question.
+    10) If user asks “latest/recent”, order by startdate DESC.
     If user asks “oldest/earliest”, order by startdate ASC.
-    10) If the user asks for “top N”, return records but set limit=N and order by value_num DESC when value_num is relevant.
-    11) If you are unsure, use where_sql="TRUE" and choose a safe limit.
+    11) If you are unsure or the user question is vague or chit chat intentsion use where_sql="FALSE".
+    12) You MUST ALWAYS return all four keys.
+    13) Never return empty JSON always return a valid JSON plan. So Return EXACTLY this:
+    {{
+        "where_sql": "FALSE",
+        "params": [],
+        "order_by": "startdate DESC",
+        "limit": 1
+    }}
 
     Today’s date is: {today_str}
 
@@ -977,11 +985,20 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     }}
 
     Example 2:
-    User question: "Show records of malaria in first 75 days of 2016"
+    User question: "Show records of malaria with non followed up cases in first 75 days of 2016"
     Output:
     {{
-    "where_sql": "dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
-    "params": ["%malaria%", "2016-01-01", "2016-03-16"],
+    "where_sql": "dataelement_name ILIKE %s AND followup = %s AND startdate >= %s AND startdate < %s",
+    "params": ["%malaria%", FALSE,"2016-01-01", "2016-03-16"],
+    "order_by": "startdate DESC",
+    "limit": 200
+    }}
+
+    Example 3:
+    User question: show records in 2015 with value equal to 25
+    {{
+    "where_sql": "startdate >= %s AND startdate < %s AND value_num = %s",
+    "params": ["2015-01-01", "2016-01-01", 25],
     "order_by": "startdate DESC",
     "limit": 200
     }}
@@ -992,8 +1009,6 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
 
     instr = get_cached_llm_plan(prompt, hf_token)
     decoded = json.dumps(instr)  # only for debug compatibility
-
-
 
     instr: Dict[str, Any] = {}
     m = re.search(r"\{[\s\S]*\}", decoded)
@@ -1043,7 +1058,15 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
 
         # Heuristics
         if "followup" not in filters and re.search(r"follow[- ]?up|flagged", question, re.IGNORECASE):
-            filters["followup"] = True
+            q = question.lower()
+
+            if re.search(r"(not|no|without|false|pending|missing|unresolved).*follow[- ]?up", q) or \
+            re.search(r"follow[- ]?up.*(not|no|without|false|pending|missing|unresolved)", q):
+                filters["followup"] = False
+
+            elif re.search(r"(with|has|completed|maintained|true|done).*follow[- ]?up", q) or \
+                re.search(r"follow[- ]?up.*(with|has|completed|maintained|true|done)", q):
+                filters["followup"] = True
 
         lvl = re.search(r"\blevel\s*(\d+)\b", question, re.IGNORECASE)
         if lvl and "hierarchylevel" not in filters:
@@ -1066,7 +1089,7 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
         where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
         order_by = f"{date_col} {sort_dir}"
         query_limit = row_limit
-
+       
     summary_mode = is_summary_question(question)
 
     if summary_mode:
@@ -1093,7 +1116,7 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
             sql = build_query(where_sql, order_by)
             df = run_query(conn_str, sql, params + [query_limit, query_offset])
             clean_df = make_user_friendly_table(df)
-
+            
         if include_insights:
             insights=build_insights(where_sql,conn_str,params)
             total_rows=count_total_rows(where_sql,conn_str,params)

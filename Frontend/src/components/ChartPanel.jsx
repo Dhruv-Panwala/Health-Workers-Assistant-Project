@@ -2,9 +2,7 @@ import React from "react";
 import "./ChartPanel.css";
 
 function ChartsPanel({ insights, view }) {
-  //
   // 1️⃣ Summary queries never have insights
-  //
   if (view === "summary") {
     return (
       <div className="charts-panel">
@@ -18,10 +16,7 @@ function ChartsPanel({ insights, view }) {
     );
   }
 
-  //
-  // 2️⃣ Insights still loading OR not yet returned
-  //
-  if (!insights) {
+  if (!insights || !insights.data) {
     return (
       <div className="charts-panel">
         <div className="chart-card">
@@ -32,16 +27,13 @@ function ChartsPanel({ insights, view }) {
     );
   }
 
-  //
+
   // 3️⃣ Validate insights structure
-  //
   const mode = insights.mode;
   const data = Array.isArray(insights.data) ? insights.data : [];
 
   const isInvalid =
-    mode === "none" ||
-    !mode ||
-    data.length === 0;
+    mode === "none" || !mode;
 
   if (isInvalid) {
     return (
@@ -56,9 +48,7 @@ function ChartsPanel({ insights, view }) {
     );
   }
 
-  //
   // 4️⃣ Determine title
-  //
   const title =
     mode === "top_orgs"
       ? "Top Organisations (by total value)"
@@ -66,9 +56,7 @@ function ChartsPanel({ insights, view }) {
       ? "Top Metrics (by total value)"
       : "Insights";
 
-  //
   // 5️⃣ Compute scale
-  //
   const maxValue = Math.max(...data.map((d) => d.total || 0)) || 1;
 
   return (
