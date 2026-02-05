@@ -803,8 +803,14 @@ def build_insights(where_sql:str,conn_str: str, params: List[Any]):
                     {"name": r["dataelement_name"], "total": float(r["total_value"])}
                     for _, r in top.iterrows()
                 ]
+
         else:
-            insights["mode"] = "none"
+            total = chart_df["total_value"].sum()
+
+            insights["mode"] = "single_total"
+            insights["data"] = [
+                {"name": "Total", "total": float(total)}
+            ]
     return insights
 
 def count_total_rows(where_sql:str,conn_str: str, params: List[Any]):
@@ -930,15 +936,32 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     - `limit`: integer between 1 and {row_limit}.
 
     Follow this reasoning process:
-    1. Identify the **metric** or data element (e.g. malaria, malaria positve, deaths, visits).Metric is OPTIONAL. If the user does NOT explicitly mention a disease/indicator/metric, DO NOT add any dataelement_name filter. Never guess or invent a metric. Never guess or infer a metric from numbers or dates. Years (e.g., 2015) are NOT metrics.
+    1. Identify the **metric** or data element (e.g. malaria, malaria positve, deaths, visits). If multiple metrics are mentioned, you MUST include ALL of them. Never drop any metric. Create one ILIKE placeholder per metric and combine using OR.
     → Use `dataelement_name ILIKE %s` to filter.
     2. Identify the **facility** by name (e.g. Red Cross Clinic, Ngelehun CHC). If multiple facilities are mentioned, you MUST include ALL of them. Never drop any facility. Create one ILIKE placeholder per facility and combine using OR.
-    → Use `orgunit_name ILIKE %s` to per facility and combine using OR.
+    → Use `orgunit_name ILIKE %s` to filter.
     3. Identify any **date/time filters** (e.g. last 3 months, in 2016).
     → Use `startdate >= %s AND startdate < %s` for filtering.
     4. Identify follow-up status intent phrases meaning completed/maintained/flagged/reviewed → followup IS TRUE while phrases meaning not followed up/pending/unresolved/missing → followup IS FALSE
     -> if mentioned, include filter: followup = %s
     5. Identify **sorting direction** (e.g. latest → DESC).
+    6. 6. Logical grouping rules (CRITICAL):
+    - Conditions on the SAME column must be grouped together using parentheses and combined using OR.
+    - Conditions on DIFFERENT columns must be combined using AND.
+    - ALWAYS wrap OR groups in parentheses.
+
+    Examples:
+
+    Multiple facilities:
+    (orgunit_name ILIKE %s OR orgunit_name ILIKE %s)
+
+    Multiple metrics:
+    (dataelement_name ILIKE %s OR dataelement_name ILIKE %s)
+
+    Combined:
+    (org filters) AND (metric filters) AND date filters
+
+    NEVER mix AND/OR without parentheses.
 
     Handle these phrases using ISO dates:
     - “last X days” → compute today minus X days to today
@@ -963,9 +986,11 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     9) MUST include all filters mentioned in question.
     10) If user asks “latest/recent”, order by startdate DESC.
     If user asks “oldest/earliest”, order by startdate ASC.
-    11) If you are unsure or the user question is vague or chit chat intentsion use where_sql="FALSE".
-    12) You MUST ALWAYS return all four keys.
-    13) Never return empty JSON always return a valid JSON plan. So Return EXACTLY this:
+    11) NEVER output mixed AND/OR without parentheses.
+    12) Every OR group MUST be inside brackets.
+    13) If you are unsure or the user question is vague or chit chat intentsion use where_sql="FALSE".
+    14) You MUST ALWAYS return all four keys.
+    15) Never return empty JSON always return a valid JSON plan. So Return EXACTLY this:
     {{
         "where_sql": "FALSE",
         "params": [],
@@ -994,20 +1019,12 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     "limit": 200
     }}
 
-    Example 3:
-    User question: show records in 2015 with value equal to 25
-    {{
-    "where_sql": "startdate >= %s AND startdate < %s AND value_num = %s",
-    "params": ["2015-01-01", "2016-01-01", 25],
-    "order_by": "startdate DESC",
-    "limit": 200
-    }}
-
     User question:
     {question}
     """.strip()
 
     instr = get_cached_llm_plan(prompt, hf_token)
+    print("Instr is ",instr)
     decoded = json.dumps(instr)  # only for debug compatibility
 
     instr: Dict[str, Any] = {}
@@ -1049,6 +1066,32 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
         ok, err = validate_llm_where_sql(where_sql, params)
         if ok:
             use_llm_sql = True
+
+            if " OR " in where_sql and " AND " in where_sql:
+                parts = where_sql.split(" AND ")
+
+                or_parts = [p for p in parts if " OR " in p]
+                other_parts = [p for p in parts if " OR " not in p]
+
+                if or_parts:
+                    grouped = "(" + " AND ".join(or_parts) + ")"
+                    where_sql = " AND ".join([grouped] + other_parts)
+            date_col, start_dt, end_dt, _ = extract_date_range(question)
+
+            if start_dt or end_dt:
+                date_clauses = []
+                date_params = []
+
+                if start_dt:
+                    date_clauses.append(f"{date_col} >= %s")
+                    date_params.append(start_dt.to_pydatetime())
+
+                if end_dt:
+                    date_clauses.append(f"{date_col} < %s")
+                    date_params.append(end_dt.to_pydatetime())
+
+                where_sql = f"({where_sql}) AND " + " AND ".join(date_clauses)
+                params.extend(date_params)
     # ---------------------------
     # Fallback: heuristics parsing
     # ---------------------------
@@ -1089,7 +1132,25 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
         where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
         order_by = f"{date_col} {sort_dir}"
         query_limit = row_limit
-       
+        date_col, start_dt, end_dt, _ = extract_date_range(question)
+
+        if start_dt or end_dt:
+            date_clauses = []
+            date_params = []
+
+            if start_dt:
+                date_clauses.append(f"{date_col} >= %s")
+                date_params.append(start_dt.to_pydatetime())
+
+            if end_dt:
+                date_clauses.append(f"{date_col} < %s")
+                date_params.append(end_dt.to_pydatetime())
+
+            where_sql = f"({where_sql}) AND " + " AND ".join(date_clauses)
+            params.extend(date_params)
+        print("Where SQL is:",where_sql)
+        print("Params are: ",params)
+
     summary_mode = is_summary_question(question)
 
     if summary_mode:
@@ -1112,11 +1173,13 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
             clean_df["Records"] = clean_df["Records"].fillna(0).astype(int)
 
     else:
+        print("Final Where SQL: ",where_sql)
         if include_rows:
             sql = build_query(where_sql, order_by)
             df = run_query(conn_str, sql, params + [query_limit, query_offset])
             clean_df = make_user_friendly_table(df)
-            
+            print(clean_df["Follow-up"].head())
+
         if include_insights:
             insights=build_insights(where_sql,conn_str,params)
             total_rows=count_total_rows(where_sql,conn_str,params)
