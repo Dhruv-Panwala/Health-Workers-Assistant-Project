@@ -16,6 +16,7 @@ function ChatInterface() {
   const [currentQuery, setCurrentQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const [rowsPerPage] = useState(100);
+
   const pageAbortRef = useRef(null);
 
   const API_URL = "https://health-workers-assistant-project.onrender.com/query";
@@ -23,6 +24,9 @@ function ChatInterface() {
   // store last query to avoid stale updates
   const lastQueryRef = useRef("");
 
+  // -------------------------------------------------------
+  // MAIN SUBMIT HANDLER
+  // -------------------------------------------------------
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!input.trim()) return;
@@ -43,9 +47,7 @@ function ChatInterface() {
     setShowCharts(false);
 
     try {
-      //
-      // 1️⃣ FIRST FETCH → ROWS ONLY
-      //
+
       const res = await fetch(API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -55,67 +57,65 @@ function ChatInterface() {
           page: 1,
           page_size: rowsPerPage,
           include_rows: true,
-          include_insights: false
+          include_insights: false,
         }),
       });
 
       const data = await res.json();
       if (!res.ok) throw new Error(data?.detail || "Something went wrong");
 
-      // Render table immediately
       setResult({
         question: userQuestion,
         view: data.view || "records",
         columns: data.columns || [],
         rows: data.rows || [],
         row_count: data.row_count ?? (data.rows ? data.rows.length : 0),
-        insights: null
+        insights: null,
       });
-      // Only fetch insights for records mode
-    if (data.view === "records" && data.insights_available) {
-      setLoadingInsights(true);
 
-      fetch(API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question: userQuestion,
-          debug: false,
-          page: 1,
-          page_size: rowsPerPage,
-          include_rows: false,
-          include_insights: true
-        }),
-      })
-        .then((r) => r.json())
-        .then((insightData) => {
-          if (lastQueryRef.current !== userQuestion) return;
+      if (data.insights_available) {
+        setLoadingInsights(true);
 
-          if (insightData?.insights) {
-            setResult((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    insights: insightData.insights,
-                    row_count:
-                      insightData.row_count ?? prev.row_count, // protect pagination
-                  }
-                : prev
-            );
-            setInsightsAvailable(true);
-            setShowCharts(true);
-          }
+        fetch(API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            question: userQuestion,
+            debug: false,
+            page: 1,
+            page_size: rowsPerPage,
+            include_rows: false,
+            include_insights: true,
+          }),
         })
-        .catch((err) => {
-          console.warn("Insights fetch failed:", err);
-        })
-        .finally(() => {
-          if (lastQueryRef.current === userQuestion) {
-            setLoadingInsights(false);
-          }
-        });
+          .then((r) => r.json())
+          .then((insightData) => {
+            if (lastQueryRef.current !== userQuestion) return;
+
+            if (insightData?.insights) {
+              setResult((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      insights: insightData.insights,
+                      row_count: prev.row_count,
+                    }
+                  : prev
+              );
+
+              setInsightsAvailable(true);
+              setShowCharts(true);
+            }
+          })
+          .catch((err) => {
+            console.warn("Insights fetch failed:", err);
+          })
+          .finally(() => {
+            if (lastQueryRef.current === userQuestion) {
+              setLoadingInsights(false);
+            }
+          });
       }
-
     } catch (err) {
       setError(err.message || "Failed to fetch API");
       setInsightsAvailable(false);
@@ -125,72 +125,72 @@ function ChatInterface() {
     }
   };
 
-  // Pagination Handling — preserves insights and only replaces rows
-useEffect(() => {
-  if (!currentQuery) return;
+  // -------------------------------------------------------
+  // PAGINATION (ONLY FOR RECORDS VIEW)
+  // -------------------------------------------------------
+  useEffect(() => {
+    if (!currentQuery) return;
 
-  const controller = new AbortController();
+    // Pagination should NOT run for summary mode
+    if (result?.view === "summary") return;
 
-  // cancel previous request immediately
-  if (pageAbortRef.current) {
-    pageAbortRef.current.abort();
-  }
+    const controller = new AbortController();
 
-  pageAbortRef.current = controller;
-
-  const fetchPage = async () => {
-    setLoadingTable(true);
-    setError("");
-
-    try {
-      const res = await fetch(API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,   // ⭐ important
-        body: JSON.stringify({
-          question: currentQuery,
-          debug: false,
-          page: currentPage,
-          page_size: rowsPerPage,
-          include_rows: true,
-          include_insights: false
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.detail || "Something went wrong");
-
-      setResult(prev =>
-        prev
-          ? {
-              ...prev,
-              rows: data.rows || [],
-              row_count: data.row_count ?? prev.row_count,
-            }
-          : prev
-      );
-
-    } catch (err) {
-      // ignore aborted requests
-      if (err.name !== "AbortError") {
-        setError(err.message || "Failed to fetch API");
-      }
-    } finally {
-      setLoadingTable(false);
+    // cancel previous request immediately
+    if (pageAbortRef.current) {
+      pageAbortRef.current.abort();
     }
-  };
 
-  fetchPage();
+    pageAbortRef.current = controller;
 
-  // cleanup on page change/unmount
-  return () => controller.abort();
+    const fetchPage = async () => {
+      setLoadingTable(true);
+      setError("");
 
-}, [currentQuery, currentPage]);
+      try {
+        const res = await fetch(API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            question: currentQuery,
+            debug: false,
+            page: currentPage,
+            page_size: rowsPerPage,
+            include_rows: true,
+            include_insights: false,
+          }),
+        });
 
-  //
-  // UI utilities
-  //
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.detail || "Something went wrong");
 
+        setResult((prev) =>
+          prev
+            ? {
+                ...prev,
+                rows: data.rows || [],
+                row_count: data.row_count ?? prev.row_count,
+              }
+            : prev
+        );
+      } catch (err) {
+        if (err.name !== "AbortError") {
+          setError(err.message || "Failed to fetch API");
+        }
+      } finally {
+        setLoadingTable(false);
+      }
+    };
+
+    fetchPage();
+
+    return () => controller.abort();
+  }, [currentQuery, currentPage]);
+
+  // -------------------------------------------------------
+  // UI HELPERS
+  // -------------------------------------------------------
   const paginatedRows = Array.isArray(result?.rows) ? result.rows : [];
   const totalPages = Math.ceil((result?.row_count || 0) / rowsPerPage);
 
@@ -204,10 +204,13 @@ useEffect(() => {
     }
   };
 
+  // -------------------------------------------------------
+  // RENDER
+  // -------------------------------------------------------
   return (
     <div className="chat-container">
       <div className="chat-interface">
-
+        {/* Input */}
         <form className="input-section input-top" onSubmit={handleSubmit}>
           <div className="input-container">
             <textarea
@@ -218,14 +221,23 @@ useEffect(() => {
               placeholder="Type your health-related question here..."
               rows="3"
             />
-            <button type="submit" className="send-button" disabled={!input.trim()}>
+            <button
+              type="submit"
+              className="send-button"
+              disabled={!input.trim()}
+            >
               {loadingTable ? "..." : "Send"}
             </button>
           </div>
         </form>
 
-        <div className={`content-grid ${showCharts && insightsAvailable ? "with-insights" : ""}`}>
-
+        {/* Layout */}
+        <div
+          className={`content-grid ${
+            showCharts && insightsAvailable ? "with-insights" : ""
+          }`}
+        >
+          {/* Output */}
           <div className="output-section">
             {currentQuery && (
               <div className="query-display">
@@ -236,43 +248,49 @@ useEffect(() => {
 
             <div className="output-box">
               {error && <div className="error-text">Error: {error}</div>}
-              {loadingTable && <div className="loading-text">Fetching results...</div>}
+              {loadingTable && (
+                <div className="loading-text">Fetching results...</div>
+              )}
 
-              {!loadingTable && result && (
-                ((result?.columns?.length || 0)>0) ? (
-                  <div className="table-wrapper">
-                    <table className="result-table">
-                      <thead>
-                        <tr>
-                          {result.columns.map((col, idx) => <th key={idx}>{col}</th>)}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {paginatedRows.length > 0 ? (
-                          paginatedRows.map((row, rIdx) => (
-                            <tr key={rIdx}>
-                              {result.columns.map((_, cIdx) => (
-                                <td key={cIdx}>
-                                  {row[cIdx] === null || row[cIdx] === undefined
-                                    ? "-"
-                                    : String(row[cIdx])}
-                                </td>
-                              ))}
-                            </tr>
-                          ))
-                        ) : (
-                          <tr>
-                            <td colSpan={result.columns.length} style={{ padding: "14px" }}>
-                              No rows returned yet.
-                            </td>
+              {!loadingTable && result && result.columns.length > 0 && (
+                <div className="table-wrapper">
+                  <table className="result-table">
+                    <thead>
+                      <tr>
+                        {result.columns.map((col, idx) => (
+                          <th key={idx}>{col}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {paginatedRows.length > 0 ? (
+                        paginatedRows.map((row, rIdx) => (
+                          <tr key={rIdx}>
+                            {result.columns.map((_, cIdx) => (
+                              <td key={cIdx}>
+                                {row[cIdx] === null || row[cIdx] === undefined
+                                  ? "-"
+                                  : typeof row[cIdx] === "number"
+                                    ? Math.floor(row[cIdx]).toLocaleString()
+                                    : String(row[cIdx])
+                                }
+                              </td>
+                            ))}
                           </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="empty-text">No columns returned from API.</div>
-                )
+                        ))
+                      ) : (
+                        <tr>
+                          <td
+                            colSpan={result.columns.length}
+                            style={{ padding: "14px" }}
+                          >
+                            No rows returned yet.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               )}
 
               {loadingInsights && (
@@ -280,13 +298,31 @@ useEffect(() => {
               )}
             </div>
 
-            <div className="pagination-controls">
-              <button onClick={() => setCurrentPage(p => p - 1)} disabled={!canGoPrev}>Previous</button>
-              <span>Page {currentPage} of {totalPages}</span>
-              <button onClick={() => setCurrentPage(p => p + 1)} disabled={!canGoNext}>Next</button>
-            </div>
+            {/* Pagination only for records */}
+            {result?.view === "records" && (
+              <div className="pagination-controls">
+                <button
+                  onClick={() => setCurrentPage((p) => p - 1)}
+                  disabled={!canGoPrev}
+                >
+                  Previous
+                </button>
+
+                <span>
+                  Page {currentPage} of {totalPages}
+                </span>
+
+                <button
+                  onClick={() => setCurrentPage((p) => p + 1)}
+                  disabled={!canGoNext}
+                >
+                  Next
+                </button>
+              </div>
+            )}
           </div>
 
+          {/* Charts */}
           {showCharts && insightsAvailable && (
             <div className="insights-section">
               <ChartsPanel insights={result?.insights} view={result?.view} />
@@ -294,25 +330,16 @@ useEffect(() => {
           )}
         </div>
 
+        {/* Floating Button */}
         <div className="insights-float">
-          <span
-            className="tooltip-wrapper"
-            data-tooltip={
-              insightsAvailable
-                ? (showCharts ? "Hide insights" : "Show insights")
-                : "Insights not available yet"
-            }
+          <button
+            className="insights-btn"
+            disabled={!insightsAvailable}
+            onClick={() => setShowCharts((p) => !p)}
           >
-            <button
-              className="insights-btn"
-              disabled={!insightsAvailable}
-              onClick={() => setShowCharts(p => !p)}
-            >
-              {showCharts ? "Hide Insights" : "Insights"}
-            </button>
-          </span>
+            {showCharts ? "Hide Insights" : "Insights"}
+          </button>
         </div>
-
       </div>
     </div>
   );

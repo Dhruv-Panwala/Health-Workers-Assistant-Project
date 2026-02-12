@@ -192,9 +192,9 @@ def extract_date_range(question: str,) -> Tuple[str, pd.Timestamp | None, pd.Tim
     start = None
     end = None
 
-    LAST_WORDS = r"(?:last|previous|past|recent|trailing)"
-    MONTH_WORDS = r"(?:month|months|mth|mths)"
-    DAY_WORDS = r"(?:day|days)"
+    LAST_WORDS = r"(last|previous|past|recent|trailing)"
+    MONTH_WORDS = r"(month|months|mth|mths)"
+    DAY_WORDS = r"(day|days)"
 
 
     m = re.search(r"(20\d{2})\s*(?:to|and|-)\s*(20\d{2})", q)
@@ -204,18 +204,20 @@ def extract_date_range(question: str,) -> Tuple[str, pd.Timestamp | None, pd.Tim
         end = pd.Timestamp(y2 + 1, 1, 1)
         return date_col, start, end, "DESC"
 
-    m = re.search(rf"{LAST_WORDS}\s+(\d+)\s+{MONTH_WORDS}\s+of\s+(20\d{{2}})",q,)
+    m = re.search(
+        rf"{LAST_WORDS}\s+(\d+)\s+{MONTH_WORDS}\s+of\s+(20\d{{2}})",
+        q,
+    )
     if m:
-        print("Entered The date func")
-        months = int(m.group(1))
-        year = int(m.group(2))
-        print(months)
+        months = int(m.group(2))
+        year = int(m.group(3))
+
         months = max(1, min(months, 12))
 
         start_month = 13 - months
         start = pd.Timestamp(year, start_month, 1)
         end = pd.Timestamp(year + 1, 1, 1)
-        print(start,end)
+
         return date_col, start, end, "DESC"
 
     m = re.search(rf"{LAST_WORDS}\s+(\d+)\s+{MONTH_WORDS}\b", q)
@@ -287,6 +289,17 @@ def extract_date_range(question: str,) -> Tuple[str, pd.Timestamp | None, pd.Tim
         sort_dir = "ASC"
 
     return date_col, None, None, sort_dir
+
+
+# def extract_date_range(question: str):
+#     date_col = "startdate"
+
+#     start_dt, end_dt = parse_dates_with_duckling(question)
+
+#     if start_dt and end_dt:
+#         return date_col, start_dt, end_dt, "DESC"
+
+#     return date_col, None, None, "DESC"
 
 
 # ---------------------------------------------------------------------
@@ -481,15 +494,12 @@ WITH base AS (
     JOIN period p ON dv.periodid = p.periodid
     LEFT JOIN periodtype pt ON p.periodtypeid = pt.periodtypeid
 )
-SELECT
-    *,
-    COUNT(*) OVER() AS total_count
+SELECT *
 FROM base
 WHERE {where_sql}
 ORDER BY {order_by}
 LIMIT %s OFFSET %s
 """
-
 
 
 def is_summary_question(question: str) -> bool:
@@ -609,6 +619,39 @@ def build_chart_query(where_sql: str) -> str:
     WHERE {where_sql}
     GROUP BY orgunit_name, dataelement_name;
     """.strip()
+
+def count_total_rows(where_sql:str,conn_str: str, params: List[Any]):
+    count_sql = f"""
+                WITH base AS (
+                    SELECT
+                        dv.dataelementid,
+                        de.name AS dataelement_name,
+                        de.code AS dataelement_code,
+                        de.uid AS dataelement_uid,
+                        ou.organisationunitid,
+                        ou.name AS orgunit_name,
+                        ou.code AS orgunit_code,
+                        ou.uid AS orgunit_uid,
+                        ou.hierarchylevel,
+                        p.periodid,
+                        p.startdate,
+                        p.enddate,
+                        pt.name AS period_type,
+                        dv.value,
+                        CASE WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$' THEN dv.value::numeric END AS value_num,
+                        dv.comment,
+                        dv.storedby,
+                        dv.lastupdated,
+                        dv.created,
+                        COALESCE(dv.followup, FALSE) AS followup
+                    FROM datavalue dv
+                    JOIN dataelement de ON dv.dataelementid = de.dataelementid
+                    JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
+                    JOIN period p ON dv.periodid = p.periodid
+                    LEFT JOIN periodtype pt ON p.periodtypeid = pt.periodtypeid
+                )
+                SELECT COUNT(*) FROM base WHERE {where_sql};
+                """
 
 def run_query(conn_str: str, sql: str, params: List[Any]) -> pd.DataFrame:
     with psycopg2.connect(conn_str) as conn:
@@ -887,13 +930,9 @@ def build_summary_insights(where_sql, conn_str, params):
         "data": [{"name": "Total", "total": float(total)}],
     }
 
-def strip_date_filters(where_sql: str, params):
-    if not params:
-        params = []
-        print("No params received")
-
+def strip_date_filters(where_sql: str, params: List[Any]):
     pieces = re.split(r"\s+AND\s+", where_sql, flags=re.IGNORECASE)
-    print(pieces)
+
     new_sql = []
     new_params = []
 
@@ -950,32 +989,6 @@ def detect_intent(question: str):
         return "summary"
 
     return "auto"
-
-
-def auto_group_where(where_sql: str) -> str:
-    parts = re.split(r"\s+AND\s+", where_sql, flags=re.IGNORECASE)
-
-    groups = {}
-
-    for p in parts:
-        col = p.split()[0]
-        groups.setdefault(col, []).append(p)
-
-    new_parts = []
-
-    for clauses in groups.values():
-        if len(clauses) > 1:
-            joined = " OR ".join(clauses)
-
-            # avoid double parentheses
-            if not joined.strip().startswith("("):
-                joined = f"({joined})"
-
-            new_parts.append(joined)
-        else:
-            new_parts.append(clauses[0])
-
-    return " AND ".join(new_parts)
 
 
 # ---------------------------------------------------------------------
@@ -1055,11 +1068,18 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     - “last X months of YYYY”
         Definition:
         Take the FINAL X calendar months of that year.
+
         Compute:
         startdate = first day of month (13 − X)
         enddate   = first day of next year (YYYY+1-01-01)
+
+        Always output:
+        startdate >= %s AND startdate < %s
+
         Examples:
         • last 3 months of 2016 → 2016-09-01 to 2017-01-01
+        • last 6 months of 2016 → 2016-06-01 to 2017-01-01
+        • last 4 month of 2016 → 2016-08-01 to 2017-01-01
     - “between Jan 2020 and June 2020” → parse both ends into dates
 
     Hard rules:
@@ -1163,28 +1183,37 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
         use_llm_sql = True
 
         if " OR " in where_sql and " AND " in where_sql:
-            where_sql=auto_group_where(where_sql)
-        print("After Grouping:",where_sql)
-        if re.search(r"(?:last|previous|past|recent|trailing)\s+\d+\s+months?\s+of\s+20\d{2}",question.lower()):
-            print("Entered heiristics")
+            parts = re.split(r"\s+AND\s+", where_sql, flags=re.I)
+
+            or_parts = [p for p in parts if " OR " in p]
+            other_parts = [p for p in parts if " OR " not in p]
+
+            if or_parts:
+                grouped = "(" + " OR ".join(or_parts) + ")"
+                where_sql = " AND ".join([grouped] + other_parts)
+
+        if re.search(r"(last|previous|past)\s+\d+\s+months?\s+of\s+20\d{2}",question.lower()):
+            print("Heuristic date override triggered")
+
+            where_sql, params = strip_date_filters(where_sql, params)
+    
             date_col, start_dt, end_dt, sort_dir = extract_date_range(question)
-            print("Dates from function:",start_dt,end_dt)
+
             if start_dt or end_dt:
+                date_clauses = []
                 date_params = []
 
                 if start_dt:
+                    date_clauses.append(f"{date_col} >= %s")
                     date_params.append(start_dt.to_pydatetime())
 
                 if end_dt:
+                    date_clauses.append(f"{date_col} < %s")
                     date_params.append(end_dt.to_pydatetime())
 
-                # 🔹 Remove OLD date params from END only
-                old_date_count = len(date_params)   # since old dates were same pattern
-                params = params[:-old_date_count] if old_date_count else params
-                print("Old Date removed params",params)
+                where_sql = f"({where_sql}) AND " + " AND ".join(date_clauses)
                 params.extend(date_params)
-
-            print("Updated params are:", params)
+                print("Updated params are:",params)
 
     # ---------------------------
     # Fallback: heuristics parsing
@@ -1287,14 +1316,15 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     # -------------------------------
     # CASE 2: RECORDS MODE
     # -------------------------------
-    
+
     # Rows-only request
     if include_rows:
 
         sql = build_query(where_sql, order_by)
         df = run_query(conn_str, sql, params + [query_limit, query_offset])
-        total_rows = int(df["total_count"].iloc[0]) if not df.empty else 0
-        clean_df = make_user_friendly_table(df.drop(columns=["total_count"]))
+        clean_df = make_user_friendly_table(df)
+
+        total_rows = count_total_rows(where_sql, conn_str, params)
 
         return make_json_safe({
             "view": "records",
