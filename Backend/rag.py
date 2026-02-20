@@ -5,22 +5,17 @@ import pandas as pd
 import re
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from rapidfuzz import process, fuzz
-
+import pickle
 
 # -------------------------
 # Models
 # -------------------------
 
-embed_model = SentenceTransformer("multi-qa-MiniLM-L6-cos-v1")
-reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+embed_model = None
+reranker = None
 
-
-# -------------------------
-# Globals
-# -------------------------
-
-metric_names = []
-org_names = []
+metric_names = None
+org_names = None
 
 metric_index = None
 org_index = None
@@ -29,6 +24,29 @@ org_index = None
 # -------------------------
 # Build FAISS Cache
 # -------------------------
+
+def load_rag_assets():
+    global embed_model, reranker
+    global metric_names, org_names
+    global metric_index, org_index
+
+    if metric_index is None:
+
+        metric_index = faiss.read_index("metric_index.faiss")
+        org_index = faiss.read_index("org_index.faiss")
+
+        with open("metric_names.pkl", "rb") as f:
+            metric_names = pickle.load(f)
+
+        with open("org_names.pkl", "rb") as f:
+            org_names = pickle.load(f)
+
+    if embed_model is None:
+        embed_model = SentenceTransformer("multi-qa-MiniLM-L6-cos-v1")
+
+    if reranker is None:
+        reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
 
 def build_rag_cache(conn_str):
 
@@ -164,7 +182,7 @@ def rerank(full_query, candidates, top_k=5):
 # -------------------------
 
 def get_rag_context(question):
-
+    load_rag_assets()
     query = clean_question(question)
 
     org_mentions = extract_org_mentions(query)
