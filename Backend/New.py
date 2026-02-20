@@ -12,9 +12,10 @@ from datetime import datetime, date
 import psycopg2
 from dateutil import parser as dateutil_parser
 from openai import OpenAI
-from duckling_client import parse_dates_with_duckling
 from dotenv import load_dotenv
 from functools import lru_cache
+from rag import get_rag_context
+
 load_dotenv()
 
 HF_TOKEN_FALLBACK = ""  # Optional: paste token here for local-only use.
@@ -195,7 +196,6 @@ def extract_date_range(question: str,) -> Tuple[str, pd.Timestamp | None, pd.Tim
     LAST_WORDS = r"(?:last|previous|past|recent|trailing)"
     MONTH_WORDS = r"(?:month|months|mth|mths)"
     DAY_WORDS = r"(?:day|days)"
-
 
     m = re.search(r"(20\d{2})\s*(?:to|and|-)\s*(20\d{2})", q)
     if m:
@@ -543,71 +543,35 @@ def build_summary_query(where_sql: str) -> str:
     WHERE {where_sql};
     """.strip()
 
-def build_trend_query(where_sql: str) -> str:
+def build_chart_query(where_sql: str) -> str:
+    """
+    Returns aggregated chart-ready data with time dimension.
+    """
+
     return f"""
     WITH base AS (
         SELECT
-            dv.dataelementid,
             de.name AS dataelement_name,
             ou.name AS orgunit_name,
             p.startdate,
-            CASE WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$'
-                 THEN dv.value::numeric
+            CASE
+                WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$'
+                THEN dv.value::numeric
             END AS value_num
         FROM datavalue dv
-        JOIN period p ON dv.periodid = p.periodid
         JOIN dataelement de ON dv.dataelementid = de.dataelementid
         JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
+        JOIN period p ON dv.periodid = p.periodid
     )
     SELECT
         DATE_TRUNC('month', startdate) AS period,
-        SUM(value_num) AS total_value
-    FROM base
-    WHERE {where_sql}
-    GROUP BY 1
-    ORDER BY 1;
-    """
-
-def build_chart_query(where_sql: str) -> str:
-    """
-    Returns aggregated data for charts (NO pagination).
-    """
-    return f"""
-    WITH base AS (
-        SELECT
-            dv.dataelementid,
-            de.name AS dataelement_name,
-            de.code AS dataelement_code,
-            de.uid AS dataelement_uid,
-            ou.organisationunitid,
-            ou.name AS orgunit_name,
-            ou.code AS orgunit_code,
-            ou.uid AS orgunit_uid,
-            ou.hierarchylevel,
-            p.periodid,
-            p.startdate,
-            p.enddate,
-            pt.name AS period_type,
-            dv.value,
-            CASE WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$' THEN dv.value::numeric END AS value_num,
-            dv.comment,
-            dv.storedby,
-            dv.lastupdated,
-            dv.created,
-            COALESCE(dv.followup, FALSE) AS followup
-        FROM datavalue dv
-        JOIN dataelement de ON dv.dataelementid = de.dataelementid
-        JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
-        JOIN period p ON dv.periodid = p.periodid
-        LEFT JOIN periodtype pt ON p.periodtypeid = pt.periodtypeid
-    )
-    SELECT
         orgunit_name,
         dataelement_name,
         SUM(value_num) AS total_value
     FROM base
     WHERE {where_sql}
-    GROUP BY orgunit_name, dataelement_name;
+    GROUP BY 1, 2, 3
+    ORDER BY 1;
     """.strip()
 
 def run_query(conn_str: str, sql: str, params: List[Any]) -> pd.DataFrame:
@@ -755,72 +719,192 @@ def make_json_safe(obj):
 
     return obj
 
-def build_insights(where_sql:str,conn_str: str, params: List[Any]):
-    chart_sql = build_chart_query(where_sql)
-    chart_df = run_query(conn_str, chart_sql, params)
-    insights = {}
-    if not chart_df.empty:
-        unique_orgs = chart_df["orgunit_name"].nunique()
-        unique_metrics = chart_df["dataelement_name"].nunique()
+def detect_query_shape(chart_df):
+    return {
+        "has_time": chart_df["period"].nunique() > 1 if "period" in chart_df else False,
+        "multi_org": chart_df["orgunit_name"].nunique() > 1,
+        "multi_metric": chart_df["dataelement_name"].nunique() > 1,
+    }
 
-        if unique_orgs > 1:
-            top = (
-                chart_df.groupby("orgunit_name")["total_value"]
-                    .sum()
-                    .sort_values(ascending=False)
-                    .head(10)
-                    .reset_index()
-                )
-            insights["mode"] = "top_orgs"
-            insights["data"] = [
-                    {"name": r["orgunit_name"], "total": float(r["total_value"])}
-                    for _, r in top.iterrows()
-                ]
+def build_kpi_cards(df):
+    return {
+        "total": float(df["total_value"].sum()),
+        "orgs": int(df["orgunit_name"].nunique()),
+        "metrics": int(df["dataelement_name"].nunique()),
+        "records": int(df["record_count"].sum()) if "record_count" in df else None,
+    }
 
-        elif unique_metrics > 1:
-            top = (
-                chart_df.groupby("dataelement_name")["total_value"]
-                    .sum()
-                    .sort_values(ascending=False)
-                    .head(10)
-                    .reset_index()
-                )
-            insights["mode"] = "top_metrics"
-            insights["data"] = [
-                    {"name": r["dataelement_name"], "total": float(r["total_value"])}
-                    for _, r in top.iterrows()
-                ]
+def build_metric_breakdown(chart_df, top_n=10):
 
-        else:
-            total = chart_df["total_value"].sum()
-
-            insights["mode"] = "single_total"
-            insights["data"] = [
-                {"name": "Total", "total": float(total)}
-            ]
-    return insights
-
-def build_trend_insight(where_sql: str, conn_str: str, params: List[Any]) -> dict:
-    """
-    Insights for summary mode → trend chart.
-    """
-    trend_sql = build_trend_query(where_sql)
-    trend_df = run_query(conn_str, trend_sql, params)
-    if trend_df.empty:
-        return {
-            "mode": "none",
-            "data": []
-        }
+    metric_totals = (
+        chart_df.groupby("dataelement_name")["total_value"]
+        .sum()
+        .sort_values(ascending=False)
+        .head(top_n)
+        .reset_index()
+    )
 
     return {
-        "mode": "trend",
+        "type": "bar_metrics",
+        "title": "Top Metrics",
         "data": [
+            {"name": r["dataelement_name"], "total": float(r["total_value"])}
+            for _, r in metric_totals.iterrows()
+        ]
+    }
+
+def org_filter_present(where_sql):
+    return "orgunit_name" in where_sql
+
+
+def build_trend(chart_df):
+
+    trend = (
+        chart_df.groupby("period")["total_value"]
+        .sum()
+        .reset_index()
+        .sort_values("period")
+    )
+
+    return {
+        "type": "line_trend",
+        "title": "Trend Over Time",
+        "data": [
+            {"date": str(r["period"].date()), "total": float(r["total_value"])}
+            for _, r in trend.iterrows()
+        ]
+    }
+
+def build_metric_trend(chart_df, top_n=5):
+
+    top_metrics = (
+        chart_df.groupby("dataelement_name")["total_value"]
+        .sum()
+        .sort_values(ascending=False)
+        .head(top_n)
+        .index.tolist()
+    )
+
+    filtered = chart_df[chart_df["dataelement_name"].isin(top_metrics)]
+
+    grouped = (
+        filtered.groupby(["period", "dataelement_name"])["total_value"]
+        .sum()
+        .reset_index()
+        .sort_values("period")
+    )
+
+    return {
+        "type": "multi_line_metric_trend",
+        "title": "Metric Trends Over Time",
+        "series": [
+            {
+                "metric": metric,
+                "data": [
+                    {
+                        "date": str(r["period"].date()),
+                        "total": float(r["total_value"])
+                    }
+                    for _, r in grouped[grouped["dataelement_name"] == metric].iterrows()
+                ]
+            }
+            for metric in top_metrics
+        ]
+    }
+
+def build_org_breakdown(chart_df, top_n=8):
+    totals = (
+        chart_df.groupby("orgunit_name")["total_value"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+
+    top = totals.head(top_n)
+    other_sum = totals.iloc[top_n:].sum()
+
+    data = [
+        {"name": org, "total": float(val)}
+        for org, val in top.items()
+    ]
+
+    if other_sum > 0:
+        data.append({"name": "Other", "total": float(other_sum)})
+
+    return {
+        "type": "bar_orgs",
+        "title": "Top Organisations",
+        "data": data
+    }
+
+def build_org_trend(chart_df, top_n=5):
+
+    # print("Entered Org Trend Function")
+
+    # --- Clean columns ---
+    chart_df["period"] = pd.to_datetime(chart_df["period"], errors="coerce")
+    chart_df["total_value"] = pd.to_numeric(chart_df["total_value"], errors="coerce")
+
+    chart_df["orgunit_name"] = (
+        chart_df["orgunit_name"]
+        .astype(str)
+        .str.strip()
+    )
+
+    # Drop bad rows
+    chart_df = chart_df.dropna(subset=["period", "orgunit_name", "total_value"])
+
+    # print("After cleaning, rows:", len(chart_df))
+
+    # --- Monthly totals per org ---
+    monthly_org = (
+        chart_df.groupby(["period", "orgunit_name"])["total_value"]
+        .sum()
+        .reset_index()
+    )
+
+    # print("Monthly org rows:", len(monthly_org))
+    # print(monthly_org.head())
+
+    # --- Top orgs ---
+    top_orgs = (
+        monthly_org.groupby("orgunit_name")["total_value"]
+        .sum()
+        .sort_values(ascending=False)
+        .head(top_n)
+        .index.tolist()
+    )
+
+    # print("Top orgs:", top_orgs)
+
+    if not top_orgs:
+        # print("❌ No top orgs found!")
+        return None
+
+    # --- Build series ---
+    series = []
+    for org in top_orgs:
+
+        org_data = monthly_org[monthly_org["orgunit_name"] == org]
+
+        # print(f"Org {org} rows:", len(org_data))
+
+        points = [
             {
                 "date": str(r["period"].date()),
                 "total": float(r["total_value"])
             }
-            for _, r in trend_df.iterrows()
+            for _, r in org_data.iterrows()
         ]
+
+        if points:
+            series.append({"metric": org, "data": points})
+
+    # print("Final series length:", len(series))
+
+    return {
+        "type": "multi_line_metric_trend",
+        "title": "Top Organisation Trends",
+        "series": series
     }
 
 def build_summary_insights(where_sql, conn_str, params):
@@ -831,66 +915,41 @@ def build_summary_insights(where_sql, conn_str, params):
     if chart_df.empty:
         return {"mode": "none", "data": []}
 
-    unique_orgs = chart_df["orgunit_name"].nunique()
-    unique_metrics = chart_df["dataelement_name"].nunique()
-
-    # ---------------------------------------------------
-    # 1️⃣ Try trend first (most informative for summaries)
-    # ---------------------------------------------------
-    trend = build_trend_insight(where_sql, conn_str, params)
-    if trend["mode"] != "none" and len(trend["data"]) > 1:
-        return trend
-
-    # ---------------------------------------------------
-    # 2️⃣ Compare organisations
-    # ---------------------------------------------------
-    if unique_orgs > 1:
-        top = (
-            chart_df.groupby("orgunit_name")["total_value"]
-            .sum()
-            .sort_values(ascending=False)
-            .reset_index()
-        )
-        return {
-            "mode": "top_orgs",
-            "data": [
-                {"name": r["orgunit_name"], "total": float(r["total_value"])}
-                for _, r in top.iterrows()
-            ],
-        }
-
-    # ---------------------------------------------------
-    # 3️⃣ Compare metrics
-    # ---------------------------------------------------
-    if unique_metrics > 1:
-        top = (
-            chart_df.groupby("dataelement_name")["total_value"]
-            .sum()
-            .sort_values(ascending=False)
-            .reset_index()
-        )
-        return {
-            "mode": "top_metrics",
-            "data": [
-                {"name": r["dataelement_name"], "total": float(r["total_value"])}
-                for _, r in top.iterrows()
-            ],
-        }
-
-    # ---------------------------------------------------
-    # 4️⃣ Single value fallback
-    # ---------------------------------------------------
-    total = chart_df["total_value"].sum()
-
-    return {
-        "mode": "single_total",
-        "data": [{"name": "Total", "total": float(total)}],
+    insights = {
+        "mode": "dashboard",
+        "cards": {
+            "total": float(chart_df["total_value"].sum()),
+            "metrics": int(chart_df["dataelement_name"].nunique()),
+            "orgs": int(chart_df["orgunit_name"].nunique()),
+        },
+        "charts": []
     }
+    # print("ChartDF is", chart_df.head())
+    has_time = chart_df["period"].nunique() > 1
+    # print("The time period is: ",has_time)
+    multi_metric = chart_df["dataelement_name"].nunique() > 1
+    multi_org = chart_df["orgunit_name"].nunique() > 1
+
+    if has_time and multi_org and multi_metric:
+        # print("Entered time-org-filter-trend")
+        insights["charts"].append(build_org_trend(chart_df))
+    elif has_time and multi_metric:
+        # print("Entered multi metric trend")
+        insights["charts"].append(build_metric_trend(chart_df))
+    elif multi_org and org_filter_present(where_sql):
+        insights["charts"].append(build_org_breakdown(chart_df))
+    elif multi_metric:
+        insights["charts"].append(build_metric_breakdown(chart_df))
+    elif has_time:
+        insights["charts"].append(build_trend(chart_df))
+    # print("Insights are: ")
+    # print(insights)
+    return insights
 
 def strip_date_filters(where_sql: str, params):
     if not params:
         params = []
-        print("No params received")
+        # print("No params received")
 
     pieces = re.split(r"\s+AND\s+", where_sql, flags=re.IGNORECASE)
     print(pieces)
@@ -916,6 +975,7 @@ def strip_date_filters(where_sql: str, params):
 
 
 @lru_cache(maxsize=300)
+
 def get_cached_llm_plan(prompt: str, token: str) -> dict:
     """
     Calls the LLM once and caches the generated SQL plan.
@@ -953,30 +1013,36 @@ def detect_intent(question: str):
 
 
 def auto_group_where(where_sql: str) -> str:
-    parts = re.split(r"\s+AND\s+", where_sql, flags=re.IGNORECASE)
 
-    groups = {}
+    # If already grouped, DO NOTHING
+    if "(" in where_sql:
+        return where_sql
 
-    for p in parts:
-        col = p.split()[0]
-        groups.setdefault(col, []).append(p)
+    clauses = re.split(r"\s+(AND|OR)\s+", where_sql, flags=re.IGNORECASE)
 
-    new_parts = []
+    col_groups = {}
 
-    for clauses in groups.values():
-        if len(clauses) > 1:
-            joined = " OR ".join(clauses)
+    for clause in clauses:
 
-            # avoid double parentheses
-            if not joined.strip().startswith("("):
-                joined = f"({joined})"
+        clause = clause.strip()
 
-            new_parts.append(joined)
+        if clause.upper() in ("AND", "OR"):
+            continue
+
+        col = clause.split()[0]
+
+        col_groups.setdefault(col, []).append(clause)
+
+    rebuilt = []
+
+    for col, group in col_groups.items():
+
+        if len(group) > 1:
+            rebuilt.append("(" + " OR ".join(group) + ")")
         else:
-            new_parts.append(clauses[0])
+            rebuilt.append(group[0])
 
-    return " AND ".join(new_parts)
-
+    return " AND ".join(rebuilt)
 
 # ---------------------------------------------------------------------
 # CLI main
@@ -1003,22 +1069,21 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     columns_list = ", ".join(sorted(BASE_COLUMNS))
     today_str = date.today().isoformat()
 
+    top_metrics, top_orgs = get_rag_context(question)
+    print(top_metrics)
+    print(top_orgs)
+
     prompt = f"""
-    You are a Text-to-SQL planner for a PostgreSQL database.
-
-    You must return ONLY a valid JSON object (no markdown, no explanation, no SQL outside JSON).
-
-    You are querying from a CTE named `base` with these columns:
+    You are a STRICT Text-to-SQL planner for a PostgreSQL database.
+    You must return ONLY a valid JSON object.NO markdown.NO explanation.NO SQL outside JSON.
+    You are querying from a CTE named `base` with ONLY these columns:
     {columns_list}
-
     Task:
     Given the user’s question, produce a JSON plan with exactly these keys:
-
     - `where_sql`: SQL boolean condition for filtering rows from `base` (do NOT include the word "WHERE").
     - `params`: array of values corresponding to the `%s` placeholders in `where_sql`.
     - `order_by`: one of the base columns + ASC or DESC (e.g., `startdate DESC`). Use only listed columns.
     - `limit`: integer between 1 and {row_limit}.
-
     Follow this reasoning process:
     1. Identify the **metric** or data element (e.g. malaria, malaria negative, deaths, visits). If multiple metrics are mentioned, you MUST include ALL of them. Never drop any metric. Create one ILIKE placeholder per metric and combine using OR.
     → Use `dataelement_name ILIKE %s` to filter.
@@ -1029,39 +1094,23 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     4. Identify follow-up status intent phrases meaning completed/maintained/flagged/reviewed → followup IS TRUE while phrases meaning not followed up/pending/unresolved/missing → followup IS FALSE
     -> if mentioned, include filter: followup = %s
     5. Identify **sorting direction** (e.g. latest → DESC).
-    6. 6. Logical grouping rules (CRITICAL):
+    6. Logical grouping rules (CRITICAL):
     - Conditions on the SAME column must be grouped together using parentheses and combined using OR.
     - Conditions on DIFFERENT columns must be combined using AND.
     - ALWAYS wrap OR groups in parentheses.
-
     Examples:
-
     Multiple facilities:
     (orgunit_name ILIKE %s OR orgunit_name ILIKE %s)
-
+    Note: Never use AND between multiple orgunit_name
     Multiple metrics:
     (dataelement_name ILIKE %s OR dataelement_name ILIKE %s)
-
     Combined:
     (org filters) AND (metric filters) AND date filters
-
     NEVER mix AND/OR without parentheses.
-
     Extract the exact date and time from the following phrases and return in ISO format:
     - “last X days” → compute today minus X days to today
     - “last month” → from 1st of previous month to 1st of current month
-    - “first 75 days of 2016” → "2016-01-01" to "2016-03-16"
     - “in 2022” → "2022-01-01" to "2023-01-01"
-    - “last X months of YYYY”
-        Definition:
-        Take the FINAL X calendar months of that year.
-        Compute:
-        startdate = first day of month (13 − X)
-        enddate   = first day of next year (YYYY+1-01-01)
-        Examples:
-        • last 3 months of 2016 → 2016-09-01 to 2017-01-01
-    - “between Jan 2020 and June 2020” → parse both ends into dates
-
     Hard rules:
     1) Use ONLY the listed columns. Do not invent column names.
     2) Never put user values directly into SQL. Always use %s placeholders.
@@ -1069,29 +1118,21 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     4) Prefer ILIKE for text matching.
     5) If user mentions an organisation/facility/district name, filter using: orgunit_name ILIKE %s
     6) If user mentions a metric/indicator/disease (e.g., malaria, malaria negative,cholera, deaths, tests), filter using: dataelement_name ILIKE %s
-    7) If user requests a time period, filter using startdate:
-    startdate >= %s AND startdate < %s
-    Use ISO dates (YYYY-MM-DD).
-    8)If the question references follow-up status in any way,
-    use the column: followup = %s
-    (TRUE or FALSE based on intent)
+    7) If user requests a time period, filter using startdate: startdate >= %s AND startdate < %s
+    8)If the question references follow-up status in any way,use the column: followup = %s(TRUE or FALSE based on intent)
     9) MUST include all filters mentioned in question.
-    10) If user asks “latest/recent”, order by startdate DESC.
-    If user asks “oldest/earliest”, order by startdate ASC.
+    10) If user asks “latest/recent”, order by startdate DESC. If user asks “oldest/earliest”, order by startdate ASC.
     11) NEVER output mixed AND/OR without parentheses.
     12) Every OR group MUST be inside brackets.
     13) If you are unsure or the user question is vague or chit chat intentsion use where_sql="FALSE".
-    14) You MUST ALWAYS return all four keys.
-    15) Never return empty JSON always return a valid JSON plan. So Return EXACTLY this:
+    14) Never return empty JSON always return a valid JSON plan. So Return EXACTLY this:
     {{
         "where_sql": "FALSE",
         "params": [],
         "order_by": "startdate DESC",
         "limit": 1
     }}
-
     Today’s date is: {today_str}
-
     Example 1:
     User question: "Show records from Loreto Clinic related to malaria cases between Jan to April 2016"
     {{
@@ -1100,7 +1141,6 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     "order_by": "startdate DESC",
     "limit": 200
     }}
-
     Example 2:
     User question: "Show records of malaria with non followed up cases in first 75 days of 2016"
     Output:
@@ -1110,15 +1150,37 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     "order_by": "startdate DESC",
     "limit": 200
     }}
-
     Example 3:
-    User quesiton: "How many red cross clinic patients were affected by malaria negative related results in last 4 months of 2016"
+    User quesiton: "How many red cross clinic patients were affected by malaria negative related results in 2015"
     {{
-    "where_sql": "orgunit_name ILIKE %s AND dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s"
-    "params": ['%Red Cross Clinic%', '%malaria negative%', '2016-08-01', '2016-12-31']
+    "where_sql": "orgunit_name ILIKE %s AND dataelement_name ILIKE %s AND startdate >= %s AND startdate <%s"
+    "params": ['%Red Cross Clinic%', '%malaria negative%',"2015-01-01", "2016-01-01"]
     "order_by": "startdate Desc",
     "limit": 200
     }}
+    Example 4:
+    User quesiton: "What are all the cases registered in 2016"
+    {{
+    "where_sql": "startdate >= %s AND startdate < %s",
+    "params": ["2016-01-01", "2017-01-01"],
+    "order_by": "startdate DESC",
+    "limit": 200
+    }}
+    Candidate matches from retrieval (use these FIRST, do not invent new names):
+    Top metric candidates:
+    {top_metrics}
+    Top organisation candidates:
+    {top_orgs}
+    Rules for candidates:
+    - If the user mentions a disease/indicator, choose all the closest match from Top metric candidates.
+    - If the user mentions a facility, choose all the closest match from Top organisation candidates.
+    - Do NOT hallucinate metrics/orgs outside these candidates unless user explicitly provides a name not present.
+    Broad vs Specific metric rule:
+    - Important: If the user mentions ONLY a general disease name (e.g., "measles", "cholera", "malaria") without specifying a subtype (dose, confirmed, deaths, etc.), then treat it as a BROAD request and use
+    Example: dataelement_name ILIKE %s with parameter "%measles%"
+    (do NOT restrict to only the top candidate metrics).
+    - If the user specifies a subtype or qualifier (e.g., "measles follow-up", "measles dose", "malaria positive"),
+    then use all the relevant closest matching metric and organisation candidate(s) from the Top metric and top organisations candidates list.
     User question:
     {question}
     """.strip()
@@ -1159,7 +1221,7 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
 
     ok, err = validate_llm_where_sql(where_sql, params)
 
-    if ok:
+    if ok and where_sql!="TRUE":
         use_llm_sql = True
 
         if " OR " in where_sql and " AND " in where_sql:
@@ -1181,7 +1243,6 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
                 # 🔹 Remove OLD date params from END only
                 old_date_count = len(date_params)   # since old dates were same pattern
                 params = params[:-old_date_count] if old_date_count else params
-                print("Old Date removed params",params)
                 params.extend(date_params)
 
             print("Updated params are:", params)
@@ -1242,6 +1303,8 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
 
             where_sql = f"({where_sql}) AND " + " AND ".join(date_clauses)
             params.extend(date_params)
+        if not where_sql:
+            return None
         print("Where SQL is:",where_sql)
         print("Params are: ",params)
 
@@ -1309,8 +1372,7 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     # Insights-only request (second call)
     if include_insights and not include_rows:
 
-        insights = build_insights(where_sql, conn_str, params)
-
+        insights = build_summary_insights(where_sql, conn_str, params)
         return make_json_safe({
             "view": "records",
             "columns": [],

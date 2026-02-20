@@ -5,6 +5,8 @@ import os
 from New import answer_question, build_conn_str_from_parts, preheat_database
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from rag import build_rag_cache
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -12,7 +14,7 @@ async def lifespan(app: FastAPI):
     conn_str = os.environ.get("DHIS2_DSN", "").strip() or build_conn_str_from_parts()
     if conn_str:
         preheat_database(conn_str)
-
+        build_rag_cache(conn_str)
     yield  # ⇦ FastAPI will start serving API after this line
 
     # Shutdown phase (optional cleanup)
