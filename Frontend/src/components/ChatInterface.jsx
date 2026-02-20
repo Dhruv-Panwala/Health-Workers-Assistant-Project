@@ -19,7 +19,7 @@ function ChatInterface() {
 
   const pageAbortRef = useRef(null);
 
-  const API_URL = "https://health-workers-assistant-project.onrender.com/query";
+  const API_URL = "https://lungeous-suzan-ozonous.ngrok-free.dev/query";
 
   // store last query to avoid stale updates
   const lastQueryRef = useRef("");
