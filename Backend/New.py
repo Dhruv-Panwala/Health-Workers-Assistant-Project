@@ -4,7 +4,7 @@ import re
 from calendar import monthrange
 from datetime import date
 from typing import Any, Dict, List, Tuple
-
+import tiktoken
 import pandas as pd
 import math
 import numpy as np
@@ -14,7 +14,6 @@ from dateutil import parser as dateutil_parser
 from openai import OpenAI
 from dotenv import load_dotenv
 from functools import lru_cache
-from rag import get_rag_context
 
 load_dotenv()
 
@@ -104,6 +103,51 @@ ALLOWED_SQL_KEYWORDS = {
     "false",
 }
 
+INDICATOR_SUFFIXES = {
+    "cases",
+    "case",
+    "doses",
+    "dose",
+    "tests",
+    "test",
+    "visits",
+    "visit",
+    "clients",
+    "treated",
+    "given",
+    "reported"
+}
+
+def normalize_metrics(intent: dict) -> dict:
+    """
+    Removes indicator suffix words from metric list.
+    Safe for production. Does not modify orgunit.
+    """
+
+    metrics = intent.get("metric") or []
+
+    cleaned_metrics = []
+
+    for metric in metrics:
+
+        # split words
+        words = metric.split()
+
+        # remove suffix words
+        filtered = [
+            w for w in words
+            if w.lower() not in INDICATOR_SUFFIXES
+        ]
+
+        cleaned = " ".join(filtered).strip()
+
+        if cleaned:
+            cleaned_metrics.append(cleaned)
+
+    intent["metric"] = cleaned_metrics
+
+    return intent
+
 # ---------------------------------------------------------------------
 # LLM client
 # ---------------------------------------------------------------------
@@ -116,13 +160,25 @@ def get_llm_client(token: str) -> OpenAI | None:
         api_key=token,
     )
 
-
-def run_llm_prompt(prompt: str, token: str) -> str:
+def run_sql_llm_prompt(prompt: str, token: str) -> str:
     client = get_llm_client(token)
     if client is None:
         raise ValueError("Missing HF_TOKEN for the Hugging Face router.")
     completion = client.chat.completions.create(
         model="defog/llama-3-sqlcoder-8b:featherless-ai",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+    message = completion.choices[0].message
+    return message.content or ""
+
+def run_instruct_llm_prompt(prompt: str, token: str) -> str:
+    print("Entered run_instruct_llm_prompt")
+    client = get_llm_client(token)
+    if client is None:
+        raise ValueError("Missing HF_TOKEN for the Hugging Face router.")
+    completion = client.chat.completions.create(
+        model="meta-llama/Meta-Llama-3-8B-Instruct",
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
     )
@@ -338,7 +394,6 @@ def canonical_filter_name(name: str) -> str:
     key = name.lower()
     return FILTER_ALIASES.get(key, key)
 
-
 def normalize_filter_value(value: Any) -> Any:
     if isinstance(value, list):
         if len(value) == 3 and isinstance(value[0], str) and value[0].lower() == "range":
@@ -451,8 +506,55 @@ def build_where(
 # Query builder & execution
 # ---------------------------------------------------------------------
 
-def build_query(where_sql: str, order_by: str) -> str:
-    return f"""
+def build_query(
+    select_sql: str,
+    where_sql: str,
+    order_by: str,
+    group_by: str = ""
+) -> str:
+
+    if group_by:
+        # Aggregated query
+        return f"""
+WITH base AS (
+    SELECT
+        dv.dataelementid,
+        de.name AS dataelement_name,
+        de.code AS dataelement_code,
+        de.uid AS dataelement_uid,
+        ou.organisationunitid,
+        ou.name AS orgunit_name,
+        ou.code AS orgunit_code,
+        ou.uid AS orgunit_uid,
+        ou.hierarchylevel,
+        p.periodid,
+        p.startdate,
+        p.enddate,
+        pt.name AS period_type,
+        dv.value,
+        CASE WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$' THEN dv.value::numeric END AS value_num,
+        dv.comment,
+        dv.storedby,
+        dv.lastupdated,
+        dv.created,
+        COALESCE(dv.followup, FALSE) AS followup
+    FROM datavalue dv
+    JOIN dataelement de ON dv.dataelementid = de.dataelementid
+    JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
+    JOIN period p ON dv.periodid = p.periodid
+    LEFT JOIN periodtype pt ON p.periodtypeid = pt.periodtypeid
+)
+SELECT
+    {select_sql}
+FROM base
+WHERE {where_sql}
+GROUP BY {group_by}
+ORDER BY {order_by}
+LIMIT %s OFFSET %s
+"""
+    else:
+        # Standard row query
+        return f"""
 WITH base AS (
     SELECT
         dv.dataelementid,
@@ -490,8 +592,6 @@ ORDER BY {order_by}
 LIMIT %s OFFSET %s
 """
 
-
-
 def is_summary_question(question: str) -> bool:
     q = question.lower().strip()
     return bool(
@@ -500,7 +600,6 @@ def is_summary_question(question: str) -> bool:
             q,
         )
     )
-
 
 def build_summary_query(where_sql: str) -> str:
     """
@@ -579,7 +678,6 @@ def run_query(conn_str: str, sql: str, params: List[Any]) -> pd.DataFrame:
         df = pd.read_sql(sql, conn, params=params)
     return df
 
-
 def validate_llm_where_sql(where_sql: str, params: List[Any]) -> Tuple[bool, str]:
     if re.search(r";|--|/\\*|\\*/", where_sql):
         return False, "Disallowed SQL tokens in where_sql."
@@ -601,75 +699,111 @@ def validate_llm_where_sql(where_sql: str, params: List[Any]) -> Tuple[bool, str
             return False, f"Unexpected identifier in where_sql: {tok}"
     return True, ""
 
-
-def normalize_order_by(order_by: str, default: str) -> str:
+def normalize_order_by(order_by: str, default: str, select_sql: str = "") -> str:
     m = re.match(
-        r"^\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(ASC|DESC)?\\s*$",
+        r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(ASC|DESC)?\s*$",
         order_by,
         re.IGNORECASE,
     )
     if not m:
         return default
+
     col = m.group(1).lower()
-    if col not in {c.lower() for c in BASE_COLUMNS}:
-        return default
     direction = (m.group(2) or "DESC").upper()
+
+    base_cols = {c.lower() for c in BASE_COLUMNS}
+
+    # 🔹 Extract aliases from select_sql (e.g., SUM(value_num) AS total_value)
+    aliases = set()
+    if select_sql:
+        for alias_match in re.findall(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)", select_sql, re.IGNORECASE):
+            aliases.add(alias_match.lower())
+
+    if col not in base_cols and col not in aliases:
+        return default
+
     return f"{col} {direction}"
-
-
 # ---------------------------------------------------------------------
 # Output Sanitizer (User-friendly table)
 # ---------------------------------------------------------------------
 
 def make_user_friendly_table(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Drops technical columns and keeps only columns useful for non-technical users.
-    Also renames headers for UI.
+    Formats both raw record results and aggregated/grouped results
+    into a UI-safe table.
     """
-    keep_cols = [
-        "orgunit_name",
-        "dataelement_name",
-        "startdate",
-        "enddate",
-        "period_type",
-        "value_num",
-        "value",
-        "followup",
-    ]
+    print("Entered make user friendly")
+    if df.empty:
+        return df
 
-    cols = [c for c in keep_cols if c in df.columns]
-    clean = df[cols].copy()
+    technical_cols = {
+        "dataelementid",
+        "organisationunitid",
+        "periodid",
+        "dataelement_code",
+        "dataelement_uid",
+        "orgunit_code",
+        "orgunit_uid",
+        "hierarchylevel",
+        "comment",
+        "storedby",
+        "lastupdated",
+        "created",
+        "total_count",
+    }
 
-    # Create a single "Value" column (prefer numeric)
-    if "value_num" in clean.columns and clean["value_num"].notna().any():
-        clean["Value"] = clean["value_num"]
-    elif "value" in clean.columns:
-        clean["Value"] = clean["value"]
-    else:
-        clean["Value"] = None
+    # Drop technical columns if present
+    df = df.drop(columns=[c for c in technical_cols if c in df.columns])
+    print(df.columns)
+    # -------------------------
+    # Detect RAW mode
+    # -------------------------
+    raw_signature = {"orgunit_name", "dataelement_name", "startdate"}
 
-    # Drop raw value columns
-    clean = clean.drop(columns=[c for c in ["value_num", "value"] if c in clean.columns])
+    if raw_signature.issubset(set(df.columns)):
 
-    # Rename columns for UI
+        clean = df.copy()
+
+        # Prefer numeric value
+        if "value_num" in clean.columns and clean["value_num"].notna().any():
+            clean["Value"] = clean["value_num"]
+        elif "value" in clean.columns:
+            clean["Value"] = clean["value"]
+
+        clean = clean.drop(columns=[c for c in ["value_num", "value"] if c in clean.columns])
+        rename_map = {
+            "orgunit_name": "Organisation Unit",
+            "dataelement_name": "Metric",
+            "startdate": "Start Date",
+            "enddate": "End Date",
+            "period_type": "Period Type",
+            "followup": "Follow-up",
+        }
+
+        clean = clean.rename(columns=rename_map)
+
+        if "Start Date" in clean.columns:
+            clean["Start Date"] = pd.to_datetime(clean["Start Date"], errors="coerce").dt.date
+        if "End Date" in clean.columns:
+            clean["End Date"] = pd.to_datetime(clean["End Date"], errors="coerce").dt.date
+
+        return clean
+
+    # -------------------------
+    # Aggregated / Grouped mode
+    # -------------------------
+    clean = df.copy()
+
     rename_map = {
         "orgunit_name": "Organisation Unit",
         "dataelement_name": "Metric",
-        "startdate": "Start Date",
-        "enddate": "End Date",
-        "period_type": "Period Type",
-        "followup": "Follow-up",
+        "total_value": "Total",
+        "record_count": "Records",
     }
+
     clean = clean.rename(columns=rename_map)
 
-    # Format dates
-    if "Start Date" in clean.columns:
-        clean["Start Date"] = pd.to_datetime(clean["Start Date"], errors="coerce").dt.date
-    if "End Date" in clean.columns:
-        clean["End Date"] = pd.to_datetime(clean["End Date"], errors="coerce").dt.date
-
     return clean
-
 
 def mentions_value(question: str) -> bool:
     return bool(
@@ -755,7 +889,6 @@ def build_metric_breakdown(chart_df, top_n=10):
 
 def org_filter_present(where_sql):
     return "orgunit_name" in where_sql
-
 
 def build_trend(chart_df):
 
@@ -976,7 +1109,7 @@ def strip_date_filters(where_sql: str, params):
 
 @lru_cache(maxsize=300)
 
-def get_cached_llm_plan(prompt: str, token: str) -> dict:
+def get_cached_llm_plan(use_model: str,prompt: str, token: str) -> dict:
     """
     Calls the LLM once and caches the generated SQL plan.
     Subsequent identical questions reuse cached result.
@@ -985,7 +1118,11 @@ def get_cached_llm_plan(prompt: str, token: str) -> dict:
       - pagination
       - re-renders
     """
-    decoded = run_llm_prompt(prompt, token).strip()
+    print("Entered get Cached LLm plan")
+    if use_model=="SQL":
+        decoded = run_sql_llm_prompt(prompt, token).strip()
+    elif use_model=="Instruct":
+        decoded = run_instruct_llm_prompt(prompt, token).strip()
 
     instr = {}
     m = re.search(r"\{[\s\S]*\}", decoded)
@@ -1048,144 +1185,223 @@ def auto_group_where(where_sql: str) -> str:
 # CLI main
 # ---------------------------------------------------------------------
 
-def answer_question(question: str, debug: bool = False, page: int = 1, page_size: int = 100, include_insights: bool=False, include_rows:bool=True) -> dict:
-    row_limit = int(os.environ.get("ROW_LIMIT", "400"))
+def normal_query_answer(question: str, row_limit: int, conn_str: str, hf_token: str, columns_list: list, today_str: date, debug: bool = False, page: int = 1, page_size: int = 100, include_insights: bool = False, include_rows: bool = True)->dict:
+    intent_prompt = f"""
+You are a strict information extraction from engine for DHIS2 health facility data.
+CRITICAL:
+Return ONLY valid JSON.
+Do NOT include explanations.
+Do NOT include markdown.
+Do NOT include any text outside JSON.
+Output format:
+{{
+  "orgunit": "List of String",
+  "metric": "List of String"
+}}
+Domain Definitions:
+Organisation Unit (orgunit):
+A health facility or reporting unit such as: hospital, clinic, health center, medical center, MCHP, CHC, district hospital
+Examples: "Moyowa MCHP", "Bo Government Hospital", "Kenema Clinic"
+Metric:
+A health indicator, service, disease, test, or commodity such as:
+-Diseases: malaria, TB, HIV, measles
+-Services: vaccinations, deliveries, OPD visits
+-Commodities: zinc ,ORS, bed nets, vaccines
+-Indicators:cases, doses given,tests done,clients treated
+Extraction Rules:
+1. Extract ONLY values explicitly present in question
+2. If there are multiple orgunit name or multiple orgunit names add them all.
+3. NEVER invent orgunit
+4. NEVER invent metric
+5. If missing, return empty None
+6. Preserve original wording
+7. Do NOT combine fields
+8. Do NOT guess
+Examples:
+Question:
+How many malaria cases in Moyowa MCHP?
+Output:
+{{
+  "orgunit": ["Moyowa MCHP"],
+  "metric": ["malaria"]
+}}
+Question:
+Show zinc given in Bo Government Hospital
+Output:
+{{
+  "orgunit": ["Bo Government Hospital"],
+  "metric": ["zinc"]
+}}
+Question:
+What cases for red cross, loreto and Bumban MCHP related to were malaria positive and Measles in 2016
+Output:
+{{
+  "orgunit": ["Red Cross","Loreto","Bumban MCHP"],
+  "metric": ["Malaria positive", "Measles"]
+}}
+Question:
+Show data for Moyowa MCHP
+Output:
+{{
+  "orgunit": ["Moyowa MCHP"],
+  "metric": None
+}}
+Now extract from:
+Question:
+{question}
+JSON:
+""".strip()
+    print(f'the length of intent prompt is {len(intent_prompt)}')
+    instr_intent=get_cached_llm_plan("Instruct",intent_prompt,hf_token)
+    print(instr_intent)
+    decoded_intent = json.dumps(instr_intent)
 
-    # DB connection from env
-    conn_str = os.environ.get("DHIS2_DSN", "").strip() or build_conn_str_from_parts()
-    if not conn_str:
-        raise ValueError(
-            "Missing DB config. Set DHIS2_DSN or PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD."
-        )
-
-    hf_token = os.environ.get("HF_TOKEN", "").strip() or HF_TOKEN_FALLBACK
-    if not hf_token:
-        raise ValueError("Missing HF_TOKEN in environment variables.")
-
-    question = question.strip()
-    if not question:
-        raise ValueError("No question provided.")
-
-    columns_list = ", ".join(sorted(BASE_COLUMNS))
-    today_str = date.today().isoformat()
-
-    top_metrics, top_orgs = get_rag_context(question)
-    print(top_metrics)
-    print(top_orgs)
-
+    intent_json: Dict[str, Any] = {}
+    m = re.search(r"\{[\s\S]*\}", decoded_intent)
+    if m:
+        try:
+            intent_json = json.loads(m.group())
+        except Exception:
+            intent_json = {}
+    intent_json= normalize_metrics(intent_json)
+    print(intent_json)
     prompt = f"""
-    You are a STRICT Text-to-SQL planner for a PostgreSQL database.
-    You must return ONLY a valid JSON object.NO markdown.NO explanation.NO SQL outside JSON.
-    You are querying from a CTE named `base` with ONLY these columns:
-    {columns_list}
-    Task:
-    Given the user’s question, produce a JSON plan with exactly these keys:
-    - `where_sql`: SQL boolean condition for filtering rows from `base` (do NOT include the word "WHERE").
-    - `params`: array of values corresponding to the `%s` placeholders in `where_sql`.
-    - `order_by`: one of the base columns + ASC or DESC (e.g., `startdate DESC`). Use only listed columns.
-    - `limit`: integer between 1 and {row_limit}.
-    Follow this reasoning process:
-    1. Identify the **metric** or data element (e.g. malaria, malaria negative, deaths, visits). If multiple metrics are mentioned, you MUST include ALL of them. Never drop any metric. Create one ILIKE placeholder per metric and combine using OR.
-    → Use `dataelement_name ILIKE %s` to filter.
-    2. Identify the **facility** by name (e.g. Red Cross Clinic, Ngelehun CHC). If multiple facilities are mentioned, you MUST include ALL of them. Never drop any facility. Create one ILIKE placeholder per facility and combine using OR.
-    → Use `orgunit_name ILIKE %s` to filter.
-    3. Identify any **date/time filters** (e.g. last 3 months, in 2016).
-    → Use `startdate >= %s AND startdate < %s` for filtering.
-    4. Identify follow-up status intent phrases meaning completed/maintained/flagged/reviewed → followup IS TRUE while phrases meaning not followed up/pending/unresolved/missing → followup IS FALSE
-    -> if mentioned, include filter: followup = %s
-    5. Identify **sorting direction** (e.g. latest → DESC).
-    6. Logical grouping rules (CRITICAL):
-    - Conditions on the SAME column must be grouped together using parentheses and combined using OR.
-    - Conditions on DIFFERENT columns must be combined using AND.
-    - ALWAYS wrap OR groups in parentheses.
-    Examples:
-    Multiple facilities:
-    (orgunit_name ILIKE %s OR orgunit_name ILIKE %s)
-    Note: Never use AND between multiple orgunit_name
-    Multiple metrics:
-    (dataelement_name ILIKE %s OR dataelement_name ILIKE %s)
-    Combined:
-    (org filters) AND (metric filters) AND date filters
-    NEVER mix AND/OR without parentheses.
-    Extract the exact date and time from the following phrases and return in ISO format:
-    - “last X days” → compute today minus X days to today
-    - “last month” → from 1st of previous month to 1st of current month
-    - “in 2022” → "2022-01-01" to "2023-01-01"
-    Hard rules:
-    1) Use ONLY the listed columns. Do not invent column names.
-    2) Never put user values directly into SQL. Always use %s placeholders.
-    3) Do not use semicolons, joins, subqueries, or multiple statements.
-    4) Prefer ILIKE for text matching.
-    5) If user mentions an organisation/facility/district name, filter using: orgunit_name ILIKE %s
-    6) If user mentions a metric/indicator/disease (e.g., malaria, malaria negative,cholera, deaths, tests), filter using: dataelement_name ILIKE %s
-    7) If user requests a time period, filter using startdate: startdate >= %s AND startdate < %s
-    8)If the question references follow-up status in any way,use the column: followup = %s(TRUE or FALSE based on intent)
-    9) MUST include all filters mentioned in question.
-    10) If user asks “latest/recent”, order by startdate DESC. If user asks “oldest/earliest”, order by startdate ASC.
-    11) NEVER output mixed AND/OR without parentheses.
-    12) Every OR group MUST be inside brackets.
-    13) If you are unsure or the user question is vague or chit chat intentsion use where_sql="FALSE".
-    14) Never return empty JSON always return a valid JSON plan. So Return EXACTLY this:
-    {{
-        "where_sql": "FALSE",
-        "params": [],
-        "order_by": "startdate DESC",
-        "limit": 1
-    }}
-    Today’s date is: {today_str}
-    Example 1:
-    User question: "Show records from Loreto Clinic related to malaria cases between Jan to April 2016"
-    {{
-    "where_sql": "orgunit_name ILIKE %s AND dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
-    "params": ["%Loreto Clinic%", "%malaria%","2016-01-01", "2016-04-01"],
-    "order_by": "startdate DESC",
-    "limit": 200
-    }}
-    Example 2:
-    User question: "Show records of malaria with non followed up cases in first 75 days of 2016"
-    Output:
-    {{
-    "where_sql": "dataelement_name ILIKE %s AND followup = %s AND startdate >= %s AND startdate < %s",
-    "params": ["%malaria%", FALSE,"2016-01-01", "2016-03-16"],
-    "order_by": "startdate DESC",
-    "limit": 200
-    }}
-    Example 3:
-    User quesiton: "How many red cross clinic patients were affected by malaria negative related results in 2015"
-    {{
-    "where_sql": "orgunit_name ILIKE %s AND dataelement_name ILIKE %s AND startdate >= %s AND startdate <%s"
-    "params": ['%Red Cross Clinic%', '%malaria negative%',"2015-01-01", "2016-01-01"]
-    "order_by": "startdate Desc",
-    "limit": 200
-    }}
-    Example 4:
-    User quesiton: "What are all the cases registered in 2016"
-    {{
-    "where_sql": "startdate >= %s AND startdate < %s",
-    "params": ["2016-01-01", "2017-01-01"],
-    "order_by": "startdate DESC",
-    "limit": 200
-    }}
-    Candidate matches from retrieval (use these FIRST, do not invent new names):
-    Top metric candidates:
-    {top_metrics}
-    Top organisation candidates:
-    {top_orgs}
-    Rules for candidates:
-    - If the user mentions a disease/indicator, choose all the closest match from Top metric candidates.
-    - If the user mentions a facility, choose all the closest match from Top organisation candidates.
-    - Do NOT hallucinate metrics/orgs outside these candidates unless user explicitly provides a name not present.
-    Broad vs Specific metric rule:
-    - Important: If the user mentions ONLY a general disease name (e.g., "measles", "cholera", "malaria") without specifying a subtype (dose, confirmed, deaths, etc.), then treat it as a BROAD request and use
-    Example: dataelement_name ILIKE %s with parameter "%measles%"
-    (do NOT restrict to only the top candidate metrics).
-    - If the user specifies a subtype or qualifier (e.g., "measles follow-up", "measles dose", "malaria positive"),
-    then use all the relevant closest matching metric and organisation candidate(s) from the Top metric and top organisations candidates list.
-    User question:
-    {question}
+You are a STRICT Text-to-SQL planner for a PostgreSQL database.
+You must return ONLY a valid JSON object.NO markdown.NO explanation.NO SQL outside JSON.
+You are querying from a CTE named `base` with ONLY these columns:
+{columns_list}
+Task:
+Given the user’s question, produce a JSON plan with exactly these keys:
+- `select_sql`: SQL select expression for the outer query (do NOT include the word "SELECT"); use "*" for non-aggregated row queries, use aggregate functions like SUM(value_num) AS total_value when aggregation is required, and use only columns available in base.
+- `where_sql`: SQL boolean condition for filtering rows from `base` (do NOT include the word "WHERE").
+- `params`: array of values corresponding to the `%s` placeholders in `where_sql`.
+- `group_by`: column name for grouping results (do NOT include the words "GROUP BY"); leave as empty string "" if no grouping is required; any non-aggregated column in select_sql MUST appear here.
+- `order_by`: one of the base columns + ASC or DESC, or an aggregate alias defined in select_sql (e.g., total_value DESC); use only listed base columns or defined aliases.
+- `limit`: integer between 1 and {row_limit}; use 1 for ranking queries like “most” or “highest”, otherwise default to {row_limit}.
+Intent for metric and orgunit are preclassified. They are:
+orgunits-{intent_json["orgunit"]}
+metrics-{intent_json["metric"]}
+Follow this reasoning process:
+1. Only use dataelement_name in WHERE clause if the intent metric is not ""
+2. Only use orgunit_name in WHERE clause if the intent orgunit is not "".
+3. Identify any date/time filters (e.g. last 3 months, in 2016).
+→ Use startdate >= %s AND startdate < %s for filtering.
+4. Identify follow-up status intent phrases meaning completed/maintained/flagged/reviewed → followup IS TRUE while phrases meaning not followed up/pending/unresolved/missing → followup IS FALSE
+→ if mentioned, include filter: followup = %s
+5. Identify sorting direction (e.g. latest → DESC).
+Extract the exact date and time from the following phrases and return in ISO format:
+- “last X days” → compute today minus X days to today
+- “last month” → from 1st of previous month to 1st of current month
+- “in 2022” → "2022-01-01" to "2023-01-01"
+6. Logical grouping rules (CRITICAL):
+- Conditions on the SAME column must be grouped together using parentheses and combined using OR.
+- Conditions on DIFFERENT columns must be combined using AND.
+- ALWAYS wrap OR groups in parentheses.
+Examples:
+Multiple facilities:
+(orgunit_name ILIKE %s OR orgunit_name ILIKE %s)
+Note: Never use AND between multiple orgunit_name
+Multiple metrics:
+(dataelement_name ILIKE %s OR dataelement_name ILIKE %s)
+Combined:
+(org filters) AND (metric filters) AND date filters
+Aggregation Rules:
+- If the question asks:
+"which organisation", "which facility", "most", "highest",
+"lowest", "top", "least", "maximum", "minimum"
+THEN aggregation is required.
+- For organisation ranking questions:
+select_sql = "orgunit_name, SUM(value_num) AS total_value"
+group_by = "orgunit_name"
+order_by = "total_value DESC"
+limit = 1 (unless user specifies otherwise)
+- For general totals without ranking:
+select_sql = "SUM(value_num) AS total_value"
+group_by = ""
+order_by = "total_value DESC"
+- If no aggregation is required:
+select_sql = "*"
+group_by = ""
+Hard rules:
+- If there are multiple metrics in intent then add all of them as seperate "dataelement_name ILIKE %s" and join them with OR
+- If there are multiple metrics in intent then add all of them as seperate "orgunit_name ILIKE %s" and join them with OR
+- Use ONLY the listed columns. Do not invent column names.
+- Never put values directly into where sql instead add %s in wheresql and add values in params.
+- If group_by is not empty, select_sql MUST include aggregate functions.
+- If aggregate alias is used (e.g., total_value), order_by MUST use the alias and NEVER use startdate ordering.
+- Never mix aggregated and non-aggregated columns unless included in group_by.
+- Do not invent column names. Use value_num for aggregation.
+- Do not use semicolons, joins, subqueries, or multiple statements.
+- Prefer ILIKE(Full caps) for text matching.
+- If user requests a time period, filter using startdate: startdate >= %s AND startdate < %s
+- If aggregation is NOT required and user asks “latest/recent”, order by startdate DESC. If user asks “oldest/earliest”, order by startdate ASC.
+- NEVER output mixed AND/OR without parentheses.
+- Every OR group MUST be inside brackets
+- If you are unsure or the user question is vague or chit chat intentsion use where_sql="FALSE".
+- Never return empty JSON always return a valid JSON plan.
+So Return EXACTLY this:
+{{ "where_sql": "FALSE", "params": [], "order_by": "startdate DESC", "limit": 1}}
+Today’s date is: {today_str}
+Example 1:
+User question:
+Show records from Loreto Clinic related to malaria cases between Jan to April 2016
+{{
+"select_sql": "*",
+"where_sql": "orgunit_name ILIKE %s AND dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
+"params": ["%Loreto Clinic%", "%malaria%","2016-01-01", "2016-04-01"],
+"group_by": "",
+"order_by": "startdate DESC",
+"limit": 200
+}}
+Example 2:
+User question:
+Show records of malaria with non followed up cases in first 75 days of 2016
+{{
+"select_sql": "*",
+"where_sql": "dataelement_name ILIKE %s AND followup = %s AND startdate >= %s AND startdate < %s",
+"params": ["%malaria%", FALSE,"2016-01-01", "2016-03-16"],
+"group_by": "",
+"order_by": "startdate DESC",
+"limit": 200
+}}
+Example 3:
+User question:
+How many red cross clinic patients were affected by malaria negative related results in 2015
+{{
+"select_sql": "SUM(value_num) AS total_value",
+"where_sql": "orgunit_name ILIKE %s AND dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
+"params": ["%Red Cross Clinic%", "%malaria negative%","2015-01-01", "2016-01-01"],
+"group_by": "",
+"order_by": "total_value DESC",
+"limit": 200
+}}
+Example 4:
+User question:
+What are all the cases registered in 2016
+{{
+"select_sql": "*",
+"where_sql": "startdate >= %s AND startdate < %s",
+"params": ["2016-01-01", "2017-01-01"],
+"group_by": "",
+"order_by": "startdate DESC",
+"limit": 200
+}}
+Example 5:
+User question:
+Which organisation reported most measles cases in 2015
+{{
+"select_sql": "orgunit_name, SUM(value_num) AS total_value",
+"where_sql": "dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
+"params": ["%measles%","2015-01-01","2016-01-01"],
+"group_by": "orgunit_name",
+"order_by": "total_value DESC",
+"limit": 1
+}}
+User question:
+{question}
     """.strip()
 
-    instr = get_cached_llm_plan(prompt, hf_token)
+    instr = get_cached_llm_plan("SQL",prompt, hf_token)
     print("Instr is ",instr)
     decoded = json.dumps(instr)
 
@@ -1198,25 +1414,33 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
             instr = {}
 
     use_llm_sql = False
+    select_sql="*"
     where_sql = "TRUE"
     params: List[Any] = []
-    order_by = "startdate DESC"
+    order_by = ""
+    group_by=""
     query_offset = max(0, (page - 1) * page_size)
     query_limit = page_size
-    if isinstance(instr, dict) and any(k in instr for k in ("where_sql", "params", "order_by", "limit")):
+    if isinstance(instr, dict) and any(k in instr for k in ("where_sql", "params", "order_by", "limit", "select_sql", "group_by")):
         llm_where = instr.get("where_sql", "")
         llm_params = instr.get("params", [])
         llm_order = instr.get("order_by", order_by)
         llm_limit = instr.get("limit", query_limit)
+        llm_select = instr.get("select_sql", select_sql)
+        llm_group = instr.get("group_by", group_by)
         if isinstance(llm_where, str):
             where_sql = llm_where.strip() or "TRUE"
         if isinstance(llm_params, list):
             params = llm_params
         if isinstance(llm_order, str):
-            order_by = normalize_order_by(llm_order, order_by)
+            order_by = llm_order
         if isinstance(llm_limit, int):
             query_limit = max(1, min(row_limit, llm_limit))
-        elif isinstance(llm_limit, str) and llm_limit.isdigit():
+        if isinstance(llm_select, str) and llm_select.strip():
+            select_sql = llm_select.strip()
+        if isinstance(llm_group, str):
+            group_by = llm_group.strip()
+        if isinstance(llm_limit, str) and llm_limit.isdigit():
             query_limit = max(1, min(row_limit, int(llm_limit)))
 
     ok, err = validate_llm_where_sql(where_sql, params)
@@ -1240,7 +1464,6 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
                 if end_dt:
                     date_params.append(end_dt.to_pydatetime())
 
-                # 🔹 Remove OLD date params from END only
                 old_date_count = len(date_params)   # since old dates were same pattern
                 params = params[:-old_date_count] if old_date_count else params
                 params.extend(date_params)
@@ -1332,10 +1555,7 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
         sql = build_summary_query(where_sql)
         df = run_query(conn_str, sql, params)
 
-        clean_df = df.rename(columns={
-            "total_value": "Total",
-            "record_count": "Records"
-        })
+        clean_df = make_user_friendly_table(df)
 
         return make_json_safe({
             "view": "summary",
@@ -1345,8 +1565,6 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
             "insights": None,
             "insights_available": True
         })
-
-
     # -------------------------------
     # CASE 2: RECORDS MODE
     # -------------------------------
@@ -1354,16 +1572,29 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     # Rows-only request
     if include_rows:
 
-        sql = build_query(where_sql, order_by)
+        sql =  build_query(select_sql=select_sql, where_sql=where_sql, order_by=order_by, group_by=group_by)
+        print(sql)
         df = run_query(conn_str, sql, params + [query_limit, query_offset])
-        total_rows = int(df["total_count"].iloc[0]) if not df.empty else 0
-        clean_df = make_user_friendly_table(df.drop(columns=["total_count"]))
-
+        print(df.head())
+        if not df.empty and "total_count" in df.columns:
+            total_rows = int(df["total_count"].iloc[0])
+        elif not df.empty:
+            total_rows = len(df)
+        else:
+            total_rows = 0
+        print(total_rows)
+        df_clean_input = df.drop(columns=["total_count"], errors="ignore")
+        clean_df = make_user_friendly_table(df_clean_input)
+        print(clean_df.head())
+        # Ensure consistent output even if empty
+        if clean_df is None:
+            clean_df = pd.DataFrame()
+        columns = list(clean_df.columns) if not clean_df.empty else []
         return make_json_safe({
             "view": "records",
-            "columns": list(clean_df.columns),
-            "rows": clean_df.values.tolist(),
-            "row_count": total_rows,
+            "columns": columns,
+            "rows": clean_df.fillna("").values.tolist() if not clean_df.empty else [],
+            "row_count": total_rows if total_rows is not None else 0,
             "insights": None,
             "insights_available": True
         })
@@ -1392,6 +1623,61 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
         "insights": None,
         "insights_available": False
     })
+
+def answer_question(question: str, debug: bool = False, page: int = 1, page_size: int = 100, include_insights: bool=False, include_rows:bool=True) -> dict:
+    row_limit = int(os.environ.get("ROW_LIMIT", "400"))
+
+    # DB connection from env
+    conn_str = os.environ.get("DHIS2_DSN", "").strip() or build_conn_str_from_parts()
+    if not conn_str:
+        raise ValueError(
+            "Missing DB config. Set DHIS2_DSN or PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD."
+        )
+
+    hf_token = os.environ.get("HF_TOKEN", "").strip() or HF_TOKEN_FALLBACK
+    if not hf_token:
+        raise ValueError("Missing HF_TOKEN in environment variables.")
+
+    question = question.strip()
+    if not question:
+        raise ValueError("No question provided.")
+
+    columns_list = ", ".join(sorted(BASE_COLUMNS))
+    today_str = date.today().isoformat()
+
+#     classification_prompt = f"""
+# You are a query type classifier.
+# Return ONLY valid JSON.
+# Classify the user question into one of two types:
+# - "normal" → factual data retrieval, filtering, summary, ranking
+# - "explanation" → questions asking why, cause, reason, trend interpretation, spike analysis
+# Output format:
+# {{
+#   "query_type": "normal" or "explanation"
+# }}
+# Rules:
+# - If the question contains words like:
+#   why, cause, reason, explain, trend, increase, decrease, spike, pattern, growth
+#   classify as "explanation".
+# - Otherwise classify as "normal".
+# Question:
+# {question}
+# JSON:
+#     """.strip()
+#     clssification_instr=get_cached_llm_plan("Instruct",classification_prompt, hf_token)
+#     decoded = json.dumps(clssification_instr)
+
+#     clssification_instr: Dict[str, Any] = {}
+#     m = re.search(r"\{[\s\S]*\}", decoded)
+#     if m:
+#         try:
+#             clssification_instr = json.loads(m.group())
+#         except Exception:
+#             clssification_instr = {}
+#     if clssification_instr.get("query_type")=="normal":
+    return normal_query_answer(question, row_limit, conn_str, hf_token, columns_list, today_str, debug, page, page_size, include_insights, include_rows)
+    # elif clssification_instr.get("query_type")=="explanation":
+    #     return None
 
 
 def main():
