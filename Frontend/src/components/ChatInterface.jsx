@@ -19,7 +19,7 @@ function ChatInterface() {
 
   const pageAbortRef = useRef(null);
 
-  const API_URL = "https://health-workers-assistant-project.onrender.com//query";
+  const API_URL = "https://health-workers-assistant-project.onrender.com/query";
 
   // store last query to avoid stale updates
   const lastQueryRef = useRef("");
@@ -67,9 +67,13 @@ function ChatInterface() {
       setResult({
         question: userQuestion,
         view: data.view || "records",
+
         columns: data.columns || [],
         rows: data.rows || [],
         row_count: data.row_count ?? (data.rows ? data.rows.length : 0),
+
+        answer: data.answer || null,
+
         insights: null,
       });
 
@@ -125,14 +129,11 @@ function ChatInterface() {
     }
   };
 
-  // -------------------------------------------------------
-  // PAGINATION (ONLY FOR RECORDS VIEW)
-  // -------------------------------------------------------
   useEffect(() => {
     if (!currentQuery) return;
 
     // Pagination should NOT run for summary mode
-    if (result?.view === "summary") return;
+    if (result?.view !== "records") return;
 
     const controller = new AbortController();
 
@@ -247,11 +248,24 @@ function ChatInterface() {
             )}
 
             <div className="output-box">
+
               {error && <div className="error-text">Error: {error}</div>}
               {loadingTable && (
                 <div className="loading-text">Fetching results...</div>
               )}
-
+              {/* Explainable View */}
+              {!loadingTable &&
+                result?.view === "explainable" &&
+                result?.answer && (
+                  <div className="explainable-box">
+                    <h3 style={{ marginBottom: "10px" }}>
+                      Analytical Explanation
+                    </h3>
+                    <div style={{ whiteSpace: "pre-wrap" }}>
+                      {result.answer}
+                    </div>
+                  </div>
+              )}
               {!loadingTable && result && result.columns.length > 0 && (
                 <div className="table-wrapper">
                   <table className="result-table">
@@ -299,7 +313,7 @@ function ChatInterface() {
             </div>
 
             {/* Pagination only for records */}
-            {result?.view === "records" && (
+            {result?.view === "records" && result?.columns?.length > 0 && (
               <div className="pagination-controls">
                 <button
                   onClick={() => setCurrentPage((p) => p - 1)}

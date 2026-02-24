@@ -106,8 +106,6 @@ ALLOWED_SQL_KEYWORDS = {
 INDICATOR_SUFFIXES = {
     "cases",
     "case",
-    "doses",
-    "dose",
     "tests",
     "test",
     "visits",
@@ -115,7 +113,9 @@ INDICATOR_SUFFIXES = {
     "clients",
     "treated",
     "given",
-    "reported"
+    "reported",
+    "outbreak",
+    "outbreaks"
 }
 
 def normalize_metrics(intent: dict) -> dict:
@@ -172,11 +172,23 @@ def run_sql_llm_prompt(prompt: str, token: str) -> str:
     message = completion.choices[0].message
     return message.content or ""
 
-def run_instruct_llm_prompt(prompt: str, token: str) -> str:
+def run_instruct_llm_prompt(prompt: str, token: str,payload: dict={},payload_include: bool=False) -> str:
     print("Entered run_instruct_llm_prompt")
     client = get_llm_client(token)
     if client is None:
         raise ValueError("Missing HF_TOKEN for the Hugging Face router.")
+    
+    if payload_include:
+        response = client.chat.completions.create(
+        model="meta-llama/Meta-Llama-3-8B-Instruct",
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": json.dumps(payload)}
+        ],
+        temperature=0
+        )
+        explanation = response.choices[0].message.content
+        return explanation
     completion = client.chat.completions.create(
         model="meta-llama/Meta-Llama-3-8B-Instruct",
         messages=[{"role": "user", "content": prompt}],
@@ -642,6 +654,155 @@ def build_summary_query(where_sql: str) -> str:
     WHERE {where_sql};
     """.strip()
 
+def build_explainable_query(
+    select_sql: str,
+    where_sql: str,
+    order_by: str,
+    group_by: str = ""  
+) -> str:
+    """
+    Builds SQL for explainable analytics queries.
+
+    - Aggregated queries (group_by != "") → trend / ranking / totals
+    - Non-aggregated queries → raw row inspection
+    - No OFFSET (pagination removed)
+    - Uses LIMIT %s by default (to match planner contract)
+    """
+    print("Entered build explainable query")
+    base_cte = """
+WITH base AS (
+    SELECT
+        dv.dataelementid,
+        de.name AS dataelement_name,
+        de.code AS dataelement_code,
+        de.uid AS dataelement_uid,
+        ou.organisationunitid,
+        ou.name AS orgunit_name,
+        ou.code AS orgunit_code,
+        ou.uid AS orgunit_uid,
+        ou.hierarchylevel,
+        p.periodid,
+        p.startdate,
+        p.enddate,
+        pt.name AS period_type,
+        dv.value,
+        CASE 
+            WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$' 
+            THEN dv.value::numeric 
+        END AS value_num,
+        dv.comment,
+        dv.storedby,
+        dv.lastupdated,
+        dv.created,
+        COALESCE(dv.followup, FALSE) AS followup
+    FROM datavalue dv
+    JOIN dataelement de ON dv.dataelementid = de.dataelementid
+    JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
+    JOIN period p ON dv.periodid = p.periodid
+    LEFT JOIN periodtype pt ON p.periodtypeid = pt.periodtypeid
+)
+"""
+    # -------------------------
+    # Aggregated / Explainable
+    # -------------------------
+    if group_by:
+        return f"""
+{base_cte}
+SELECT
+    {select_sql}
+FROM base
+WHERE {where_sql}
+GROUP BY {group_by}
+ORDER BY {order_by}
+""".strip()
+
+    # -------------------------
+    # Raw Row Inspection
+    # -------------------------
+    else:
+        return f"""
+{base_cte}
+SELECT
+    {select_sql}
+FROM base
+WHERE {where_sql}
+ORDER BY {order_by}
+""".strip()
+
+def build_yearly_query(
+    dataelement_include: bool,
+    where_sql: str,
+    order_by: str = "year ASC"
+) -> str:
+    """
+    Builds yearly aggregation query for explainable analytics.
+
+    Expected usage:
+    - Used for outbreak / trend explanations
+    - Requires startdate filtering in where_sql
+    - Returns yearly totals
+    """
+
+    print("Entered build yearly query")
+
+    base_cte = """
+WITH base AS (
+    SELECT
+        dv.dataelementid,
+        de.name AS dataelement_name,
+        de.code AS dataelement_code,
+        de.uid AS dataelement_uid,
+        ou.organisationunitid,
+        ou.name AS orgunit_name,
+        ou.code AS orgunit_code,
+        ou.uid AS orgunit_uid,
+        ou.hierarchylevel,
+        p.periodid,
+        p.startdate,
+        p.enddate,
+        pt.name AS period_type,
+        dv.value,
+        CASE 
+            WHEN dv.value ~ '^[-]?\\d+(\\.\\d+)?$' 
+            THEN dv.value::numeric 
+        END AS value_num,
+        dv.comment,
+        dv.storedby,
+        dv.lastupdated,
+        dv.created,
+        COALESCE(dv.followup, FALSE) AS followup
+    FROM datavalue dv
+    JOIN dataelement de ON dv.dataelementid = de.dataelementid
+    JOIN organisationunit ou ON dv.sourceid = ou.organisationunitid
+    JOIN period p ON dv.periodid = p.periodid
+    LEFT JOIN periodtype pt ON p.periodtypeid = pt.periodtypeid
+)
+"""
+    if not dataelement_include:
+        return f"""
+    {base_cte}
+    SELECT
+        EXTRACT(YEAR FROM startdate) AS year,
+        
+        SUM(value_num) AS total_value
+    FROM base
+    WHERE {where_sql}
+    GROUP BY year
+    ORDER BY {order_by}
+    """.strip()
+    else:
+        return f"""
+    {base_cte}
+    SELECT
+        EXTRACT(YEAR FROM startdate) AS year,
+        dataelement_name,
+        SUM(value_num) AS total_value
+    FROM base
+    WHERE {where_sql}
+    GROUP BY year, dataelement_name
+    ORDER BY {order_by}
+    """.strip()
+
 def build_chart_query(where_sql: str) -> str:
     """
     Returns aggregated chart-ready data with time dimension.
@@ -1105,11 +1266,205 @@ def strip_date_filters(where_sql: str, params):
         return "TRUE", []
 
     return " AND ".join(new_sql), new_params
+def build_ranking_analysis_payload(df, yearly_df):
+    payload = {
+        "ranking_summary": {},
+        "top_result": None
+    }
 
+    if df.empty:
+        return payload
+
+    payload["ranking_summary"] = {
+        "rows": len(df),
+        "max_value": float(df["total_value"].max())
+    }
+
+    payload["top_result"] = df.iloc[0].to_dict()
+    if yearly_df is not None and not yearly_df.empty:
+        ydf = yearly_df.copy()
+        ydf["total_value"] = pd.to_numeric(ydf["total_value"], errors="coerce")
+        ydf = ydf.sort_values("year")
+
+        ydf["pct_change"] = ydf["total_value"].pct_change()
+
+        payload["yearly_analysis"] = {
+            "years_present": ydf["year"].tolist(),
+            "yearly_totals": ydf["total_value"].tolist(),
+            "year_over_year_change": ydf["pct_change"].tolist()
+        }
+    return payload
+
+def build_analysis_payload(
+    monthly_df: pd.DataFrame,
+    yearly_df: pd.DataFrame | None = None
+) -> dict:
+    """
+    Converts SQL result(s) into structured analytical signals
+    for the explanation LLM.
+
+    monthly_df must contain:
+        - startdate
+        - total_value
+
+    yearly_df (optional) must contain:
+        - year
+        - total_value
+    """
+
+    payload = {
+        "data_summary": {},
+        "monthly_analysis": {},
+        "yearly_analysis": {},
+        "anomaly_detection": {}
+    }
+
+    # -------------------------
+    # BASIC CLEANING
+    # -------------------------
+    df = monthly_df.copy()
+    df["startdate"] = pd.to_datetime(df["startdate"])
+    df = df.sort_values("startdate")
+
+    # Ensure numeric
+    df["total_value"] = pd.to_numeric(df["total_value"], errors="coerce")
+
+    # -------------------------
+    # DATA SUMMARY
+    # -------------------------
+    payload["data_summary"] = {
+        "total_months": int(len(df)),
+        "overall_sum": float(df["total_value"].sum()),
+        "overall_mean": float(df["total_value"].mean()),
+        "max_value": float(df["total_value"].max()),
+        "min_value": float(df["total_value"].min())
+    }
+
+    # -------------------------
+    # MONTHLY TREND METRICS
+    # -------------------------
+    df["pct_change"] = df["total_value"].pct_change()
+
+    payload["monthly_analysis"] = {
+        "average_monthly_change": float(df["pct_change"].mean(skipna=True)),
+        "max_month": df.loc[df["total_value"].idxmax(), "startdate"].strftime("%Y-%m"),
+        "max_month_value": float(df["total_value"].max())
+    }
+
+    # -------------------------
+    # SPIKE / ANOMALY DETECTION
+    # Rolling z-score (works well for 2-year data)
+    # -------------------------
+    df["rolling_mean"] = df["total_value"].rolling(3).mean()
+    df["rolling_std"] = df["total_value"].rolling(3).std()
+
+    df["z_score"] = (
+        (df["total_value"] - df["rolling_mean"]) /
+        df["rolling_std"]
+    )
+
+    spikes = df[df["z_score"] > 2]
+
+    payload["anomaly_detection"] = {
+        "spike_count": int(len(spikes)),
+        "spike_months": spikes["startdate"].dt.strftime("%Y-%m").tolist()
+    }
+
+    # -------------------------
+    # YEARLY COMPARISON (IF AVAILABLE)
+    # -------------------------
+    if yearly_df is not None and not yearly_df.empty:
+        ydf = yearly_df.copy()
+        ydf["total_value"] = pd.to_numeric(ydf["total_value"], errors="coerce")
+        ydf = ydf.sort_values("year")
+
+        ydf["pct_change"] = ydf["total_value"].pct_change()
+
+        payload["yearly_analysis"] = {
+            "years_present": ydf["year"].tolist(),
+            "yearly_totals": ydf["total_value"].tolist(),
+            "year_over_year_change": ydf["pct_change"].tolist()
+        }
+
+    return payload
+
+def build_universal_analysis_payload(df, yearly_df):
+    columns = set(df.columns)
+
+    if "startdate" in columns:
+        return build_analysis_payload(df,yearly_df)
+
+    elif "orgunit_name" in columns:
+        return build_ranking_analysis_payload(df,yearly_df)
+
+    else:
+        return {"error": "Unsupported dataframe structure"}
+
+def explain_query(insights: dict, question: str, hf_token: str) -> str:
+    print("Entered explain query function")
+    final_payload = {
+    "insights": insights,
+    # "yearly_dataelement_breakdown": yearly_dataelement_df.to_dict(orient="records"),
+    "question": question
+    }
+    print("Final payload for explanation is:")
+    explanation_prompt = f"""
+You are an epidemiological analytics explanation engine.
+
+You will receive:
+1. A structured JSON object named "insights"
+2. A yearly breakdown table (optional)
+3. The original user question
+
+Your task is to generate a clear, evidence-based explanation of the observed patterns.
+
+STRICT CONSTRAINTS:
+- Use ONLY the provided data.
+- Do NOT introduce external knowledge.
+- Do NOT fabricate causes.
+- Do NOT claim causation.
+- Use neutral analytical language (e.g., "may indicate", "suggests", "is associated with").
+- Do NOT reference SQL, models, prompts, or system design.
+- If no meaningful patterns exist, explicitly state that no strong signal was detected.
+
+REQUIRED OUTPUT FORMAT:
+Write 1–3 well-structured paragraphs.
+
+Structure:
+
+Paragraph 1:
+Describe overall magnitude and temporal trend using data_summary and monthly_analysis.
+
+Paragraph 2:
+If anomaly_detection indicates spikes, describe:
+- Number of spikes
+- Months of spikes
+Interpret them as abnormal temporal deviations.
+
+Paragraph 3 (only if yearly_analysis exists):
+Describe year-over-year change direction and magnitude.
+If change is small, state that inter-annual variation is minimal.
+
+IMPORTANT:
+- If spike_count > 0, you MUST mention it.
+- If yearly data exists, you MUST mention whether totals increased, decreased, or remained stable.
+- Always produce a narrative response.
+- Never return empty output.
+- Never return JSON.
+- Do not output placeholders.
+
+Write clearly for public health workers.
+Be concise but complete.
+Your response must contain at least 3 sentences.
+"""
+    print("Sending explanation prompt to LLM...")   
+    explanation=run_instruct_llm_prompt( explanation_prompt, hf_token, payload=final_payload,payload_include=True)
+    print("Explanation received from LLM:", explanation)
+    return explanation
 
 @lru_cache(maxsize=300)
 
-def get_cached_llm_plan(use_model: str,prompt: str, token: str) -> dict:
+def get_cached_llm_plan(use_model: str,prompt: str, token: str, payload: dict={}, payload_include: bool=False) -> dict:
     """
     Calls the LLM once and caches the generated SQL plan.
     Subsequent identical questions reuse cached result.
@@ -1211,12 +1566,14 @@ A health indicator, service, disease, test, or commodity such as:
 Extraction Rules:
 1. Extract ONLY values explicitly present in question
 2. If there are multiple orgunit name or multiple orgunit names add them all.
-3. NEVER invent orgunit
-4. NEVER invent metric
-5. If missing, return empty None
-6. Preserve original wording
-7. Do NOT combine fields
-8. Do NOT guess
+3. Never add words like "organisation", "hospital", "clinic", "center" if not explicitly present in question. Only extract the exact orgunit name mentioned.
+4. Never add words like "cases", "tests", "given", "done" if not explicitly present in question. Only extract the exact metric name mentioned.
+5. NEVER invent orgunit
+6. NEVER invent metric
+7. If missing, return empty None
+8. Preserve original wording
+9. Do NOT combine fields
+10. Do NOT guess
 Examples:
 Question:
 How many malaria cases in Moyowa MCHP?
@@ -1528,8 +1885,8 @@ User question:
             params.extend(date_params)
         if not where_sql:
             return None
-        print("Where SQL is:",where_sql)
-        print("Params are: ",params)
+    print("Where SQL is:",where_sql)
+    print("Params are: ",params)
 
     summary_mode = is_summary_question(question)
 
@@ -1624,6 +1981,410 @@ User question:
         "insights_available": False
     })
 
+def explainable_query_answer(question: str, row_limit: int, conn_str: str, hf_token: str, columns_list: list, today_str: date, debug: bool = False)->dict:
+    print("Entered explainable query answer")
+    intent_prompt = f"""
+You are a strict information extraction engine for DHIS2 health facility data.
+CRITICAL RULES:
+Return ONLY valid JSON.
+Do NOT include explanations.
+Do NOT include markdown.
+Do NOT include any text outside JSON.
+Output must be syntactically valid JSON.
+All lists must be arrays.
+If a field is missing, return null (not empty string, not empty list).
+Required Output Format:
+{{
+"orgunit": ["string"] | null,
+"metric": ["string"] | null
+}}
+Domain Definitions:
+Organisation Unit (orgunit):
+A named health facility or reporting unit explicitly written in the question.
+Examples: Moyowa MCHP, Bo Government Hospital, Kenema Clinic, Red Cross, Loreto
+Metric:
+A health-related term explicitly written in the question referring to:
+Disease (e.g., malaria, TB, HIV, measles)
+Service (e.g., vaccinations, deliveries, OPD visits)
+Commodity (e.g., zinc, ORS, bed nets, vaccines)
+Indicator word if explicitly written together (e.g., "Malaria positive")
+Strict Extraction Rules:
+Extract ONLY exact text spans that appear in the question.
+Preserve original casing and wording exactly as written.
+Do NOT normalize text.
+Do NOT infer missing words.
+Do NOT add indicator words.
+Example: If question says "malaria cases","malaria outbreak", extract "malaria".
+Do NOT extract "malaria cases", "malaria outbreaks".
+Do NOT invent organisation units.
+Do NOT invent metrics.
+Do NOT merge separate entities into one.
+If multiple orgunits exist, return all as separate list items.
+If no orgunit is explicitly mentioned, return:
+"orgunit": null
+If no metric is explicitly mentioned, return:
+"metric": null
+Never guess abbreviations.
+Ignore time references (years, months, periods).
+Ignore aggregation words (most, total, highest, etc.).
+Ignore filter intent words (in, for, of, from, related to, etc.).
+Examples:
+Question:
+Which organisation has most measles outbreak in 2015?
+Output:
+{{
+"orgunit": None,
+"metric": ["measles"]
+}}
+Question:
+Compare malaria positive cases between Moyowa MCHP and Bo Government Hospital in 2021
+Output:
+{{
+"orgunit": ["Moyowa MCHP","Bo Government Hospital"],
+"metric": ["malaria positive"]
+}}
+Question:
+What cases for Red Cross, Loreto and Bumban MCHP related to were malaria positive and Measles in 2016
+Output:
+{{
+"orgunit": ["Red Cross", "Loreto", "Bumban MCHP"],
+"metric": ["malaria positive", "Measles"]
+}}
+Question:
+Trend of TB cases in Kenema Clinic from 2018 to 2022
+Output:
+{{
+"orgunit": ["Kenema Clinic"],
+"metric": ["TB"]
+}}
+Now extract from:
+Question:
+{question}
+JSON:
+""".strip()
+    print(f'the length of intent prompt is {len(intent_prompt)}')
+    instr_intent=get_cached_llm_plan("Instruct",intent_prompt,hf_token)
+    print(instr_intent)
+    decoded_intent = json.dumps(instr_intent)
+
+    intent_json: Dict[str, Any] = {}
+    m = re.search(r"\{[\s\S]*\}", decoded_intent)
+    if m:
+        try:
+            intent_json = json.loads(m.group())
+        except Exception:
+            intent_json = {}
+    intent_json= normalize_metrics(intent_json)
+    print(intent_json)
+    prompt=f"""
+You are a STRICT Text-to-SQL planner for a PostgreSQL database.
+You must return ONLY a valid JSON object. NO markdown. NO explanation. NO SQL outside JSON.
+You are querying from a CTE named base with ONLY these columns:
+{columns_list}
+Task:
+Given the user’s question, produce a JSON plan with exactly these keys:
+select_sql: SQL select expression for the outer query (do NOT include the word "SELECT"); use "*" for non-aggregated row queries, use aggregate functions like SUM(value_num) AS total_value when aggregation is required, and use only columns available in base.
+where_sql: SQL boolean condition for filtering rows from base (do NOT include the word "WHERE"). Use only %s placeholders for values; do NOT include LIMIT or OFFSET in where_sql.
+params: array of values corresponding to the %s placeholders in where_sql in exact left-to-right order. The planner MUST ensure the number of %s in where_sql equals len(params).
+group_by: column name for grouping results (do NOT include the words "GROUP BY"); leave as empty string "" if no grouping is required; any non-aggregated column in select_sql MUST appear here.
+order_by: one of the base columns + ASC or DESC, or an aggregate alias defined in select_sql (e.g., total_value DESC); use only listed base columns or defined aliases.
+limit: integer between 1 and {row_limit}; use 1 for ranking queries like “most” or “highest”, otherwise default to {row_limit}.
+Intent for metric and orgunit are preclassified. They are:
+orgunits-{intent_json["orgunit"]}
+metrics-{intent_json["metric"]}
+Follow this exact reasoning process (do not deviate):
+Only use dataelement_name in WHERE clause if the intent metric is not empty (not None and not []).
+Only use orgunit_name in WHERE clause if the intent orgunit is not empty (not None and not []).
+Identify any explicit date/time filters in the user question (e.g. "in 2016", "from 2018 to 2022", "last 30 days", "last month") → Always implement as startdate >= %s AND startdate < %s using ISO dates. For relative phrasing compute exact ISO boundaries from today's date {today_str}. The planner must supply both start and exclusive end in params.
+Follow-up filter mapping: completed/maintained/flagged/reviewed → followup = %s with param TRUE; pending/not followed up/unresolved/missing → followup = %s with param FALSE. Only include if the user explicitly mentions follow-up intent.
+Sorting direction: interpret "latest/recent" → startdate DESC; "oldest/earliest" → startdate ASC. Ranking keywords ("most", "highest", "top") imply aggregation and limit = 1 unless user specifies otherwise.
+Date extraction rules (must implement exactly):
+“last X days” → startdate >= (today - X days) AND startdate < (today + 1 day)
+“last month” → startdate >= first day of previous month AND startdate < first day of current month
+“in YYYY” → startdate >= "YYYY-01-01" AND startdate < "YYYY+1-01-01"
+Logical grouping rules (CRITICAL and strict):
+-Conditions on the SAME column must be grouped using parentheses and combined with OR: e.g. (orgunit_name ILIKE %s OR orgunit_name ILIKE %s).
+-Conditions on DIFFERENT columns must be combined using AND.
+-ALWAYS wrap OR groups in parentheses. NEVER output mixed AND/OR without parentheses.
+Aggregation rules (strict):
+-If the user question contains any of the keywords: "which organisation", "which facility", "most", "highest", "lowest", "top", "least", "maximum", "minimum" THEN aggregation is required.
+-Organisation ranking: select_sql = "orgunit_name, SUM(value_num) AS total_value", group_by = "orgunit_name", order_by = "total_value DESC", limit = 1 (unless user-specified limit).
+-General totals without ranking: select_sql = "SUM(value_num) AS total_value", group_by = "", order_by = "total_value DESC".
+-No aggregation required: select_sql = "*", group_by = "".
+EXPLAINABLE / CAUSAL OVERRIDE RULE (HIGHEST PRIORITY):
+If the user question contains causal or explanatory language such as:
+"why", "reason", "cause", "outbreak", "spike", "increase", 
+"rise", "drop", "decline", "high in", "low in"
+AND a time boundary is present (e.g., "in 2015", "from 2018 to 2020"):
+THEN ALWAYS treat the query as a time-series analytical query.
+In this case:
+- select_sql = "startdate, SUM(value_num) AS total_value"
+- group_by = "startdate"
+- order_by = "startdate ASC"
+- limit = {row_limit}
+- NEVER group by dataelement_name
+- NEVER group by orgunit_name unless explicitly comparing facilities
+
+This rule OVERRIDES generic aggregation and ranking rules.
+OUTBREAK BASELINE EXPANSION RULE:
+If the user question contains outbreak-related or epidemiological deviation language such as:
+"outbreak", "epidemic", "unusual increase", "why high", "spike", "surge"
+AND a specific year is mentioned (e.g., "in 2015"):
+THEN expand the date range to include one full baseline year before the target year.
+Example:
+If user says "in 2015"
+→ startdate >= "2014-01-01"
+→ startdate < "2016-01-01"
+
+Rules:
+- Keep group_by = "startdate"
+- Keep select_sql = "startdate, SUM(value_num) AS total_value"
+- order_by = "startdate ASC"
+- limit = {row_limit}
+- DO NOT change grouping to orgunit_name unless explicitly requested.
+- DO NOT expand if user explicitly restricts to exact boundary (e.g., "only 2015 data").
+
+This rule overrides standard single-year filtering for outbreak/causal queries.
+
+Hard rules (enforced):
+-If there are multiple metrics in intent add each as dataelement_name ILIKE %s and join with OR inside parentheses.
+-If there are multiple orgunits in intent add each as orgunit_name ILIKE %s and join with OR inside parentheses.
+-Use ONLY columns from {columns_list}. Do not invent column names.
+-Never put literal values directly into where_sql; always use %s and include the literals in params.
+-If group_by is not empty, select_sql MUST include aggregate functions for any non-grouped columns.
+-If an aggregate alias (e.g., total_value) is used, order_by MUST use that alias; do NOT order by startdate in that case.
+-Do not mix aggregated and non-aggregated columns unless the non-aggregated columns are included in group_by.
+-Never group by dataelement_name unless the user explicitly asks to compare different metrics.
+-Use value_num for aggregation.
+-Do not use semicolons, joins, subqueries, or multiple statements.
+-Prefer ILIKE for text matching.
+-If the user requests a time period, always express it as startdate >= %s AND startdate < %s.
+-If aggregation is NOT required and user asks “latest/recent”, order_by = "startdate DESC". If user asks “oldest/earliest”, order_by = "startdate ASC".
+-NEVER output mixed AND/OR without parentheses. Every OR group MUST be in parentheses.
+-The number of %s placeholders in where_sql MUST match the length of params.
+-If you are unsure or the user question is vague or chit-chat, set where_sql = "FALSE" but still return a complete JSON object per the fallback below.
+-Always return a valid JSON plan (never empty). If the question is vague or cannot be mapped confidently, return the fallback plan exactly:
+{{ "select_sql": "*", "where_sql": "FALSE", "params": [], "group_by": "", "order_by": "startdate DESC", "limit": 1 }}
+Example 1
+User question:
+Example 1
+User question:
+in 2015 why was there a high measles outbreak? 
+Intent: 
+{{ "orgunit": None, "metric": ["measles"] }} 
+Output: 
+{{ 
+"select_sql": "startdate, SUM(value_num) AS total_value", 
+"where_sql": "dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s", 
+"params": ["%measles%","2014-01-01","2016-01-01"], 
+"group_by": "startdate", 
+"order_by": "startdate ASC", 
+"limit": 200
+}}
+
+Example 2 
+User question:
+Compare malaria positive cases between Moyowa MCHP and Bo Government Hospital in 2021
+Intent:
+{{ "orgunit": ["Moyowa MCHP","Bo Government Hospital"], "metric": ["malaria positive"] }}
+Output:
+{{
+"select_sql": "orgunit_name, SUM(value_num) AS total_value",
+"where_sql": "(orgunit_name ILIKE %s OR orgunit_name ILIKE %s) AND dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
+"params": ["%Moyowa MCHP%","%Bo Government Hospital%","%malaria positive%","2021-01-01","2022-01-01"],
+"group_by": "orgunit_name",
+"order_by": "total_value DESC",
+"limit": 200
+}}
+
+Example 3
+User question:
+in 2015 why was there a high measles outbreak
+Intent:
+{{ "orgunit": None, "metric": ["measles"] }}
+Output:
+{{
+"select_sql": "startdate, SUM(value_num) AS total_value",
+"where_sql": "dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
+"params": ["%measles%","2014-01-01","2016-01-01"],
+"group_by": "startdate",
+"order_by": "startdate ASC",
+"limit": 200
+}}
+
+Example 4
+User question:
+What cases for Red Cross, Loreto and Bumban MCHP related to malaria positive and Measles in 2016
+Intent:
+{{ "orgunit": ["Red Cross","Loreto","Bumban MCHP"], "metric": ["malaria positive","Measles"] }}
+Output:
+{{
+"select_sql": "orgunit_name, SUM(value_num) AS total_value",
+"where_sql": "(orgunit_name ILIKE %s OR orgunit_name ILIKE %s OR orgunit_name ILIKE %s) AND (dataelement_name ILIKE %s OR dataelement_name ILIKE %s) AND startdate >= %s AND startdate < %s",
+"params": ["%Red Cross%","%Loreto%","%Bumban MCHP%","%malaria positive%","%Measles%","2016-01-01","2017-01-01"],
+"group_by": "orgunit_name",
+"order_by": "total_value DESC",
+"limit": 200
+}}
+
+User question:
+{question}
+    """.strip()
+    instr = get_cached_llm_plan("SQL", prompt, hf_token)
+    print("Instr is ", instr)
+    decoded = json.dumps(instr)
+    instr: Dict[str, Any] = {}
+    m = re.search(r"\{[\s\S]*\}", decoded)
+    if m:
+        try:
+            instr = json.loads(m.group())
+        except Exception:
+            instr = {}
+    use_llm_sql = False
+
+    select_sql = "*"
+    where_sql = "TRUE"
+    params: List[Any] = []
+    order_by = ""
+    group_by = ""
+    query_limit = row_limit  # always use system max limit
+
+    if isinstance(instr, dict) and any(
+        k in instr for k in ("where_sql", "params", "order_by", "limit", "select_sql", "group_by")
+    ):
+        llm_where = instr.get("where_sql", "")
+        llm_params = instr.get("params", [])
+        llm_order = instr.get("order_by", order_by)
+        llm_select = instr.get("select_sql", select_sql)
+        llm_group = instr.get("group_by", group_by)
+
+        if isinstance(llm_where, str):
+            where_sql = llm_where.strip() or "TRUE"
+
+        if isinstance(llm_params, list):
+            params = llm_params
+
+        if isinstance(llm_order, str):
+            order_by = llm_order
+
+        if isinstance(llm_select, str) and llm_select.strip():
+            select_sql = llm_select.strip()
+
+        if isinstance(llm_group, str):
+            group_by = llm_group.strip()
+
+    ok, err = validate_llm_where_sql(where_sql, params)
+
+    if ok and where_sql != "TRUE":
+        use_llm_sql = True
+
+        if " OR " in where_sql and " AND " in where_sql:
+            where_sql = auto_group_where(where_sql)
+
+        if re.search(
+            r"(?:last|previous|past|recent|trailing)\s+\d+\s+months?\s+of\s+20\d{2}",
+            question.lower(),
+        ):
+            date_col, start_dt, end_dt, sort_dir = extract_date_range(question)
+
+            if start_dt or end_dt:
+                date_params = []
+
+                if start_dt:
+                    date_params.append(start_dt.to_pydatetime())
+
+                if end_dt:
+                    date_params.append(end_dt.to_pydatetime())
+
+                old_date_count = len(date_params)
+                params = params[:-old_date_count] if old_date_count else params
+                params.extend(date_params)
+
+    # ---------------------------
+    # Fallback: heuristics parsing
+    # ---------------------------
+    if not use_llm_sql:
+        raw_filters = instr.get("filters", {}) if isinstance(instr, dict) else {}
+        filters = normalize_filters(raw_filters)
+
+        if "followup" not in filters and re.search(r"follow[- ]?up|flagged", question, re.IGNORECASE):
+            q = question.lower()
+
+            if re.search(
+                r"(not|no|without|false|pending|missing|unresolved).*follow[- ]?up",
+                q,
+            ) or re.search(
+                r"follow[- ]?up.*(not|no|without|false|pending|missing|unresolved)",
+                q,
+            ):
+                filters["followup"] = False
+
+            elif re.search(
+                r"(with|has|completed|maintained|true|done).*follow[- ]?up",
+                q,
+            ) or re.search(
+                r"follow[- ]?up.*(with|has|completed|maintained|true|done)",
+                q,
+            ):
+                filters["followup"] = True
+
+        lvl = re.search(r"\blevel\s*(\d+)\b", question, re.IGNORECASE)
+        if lvl and "hierarchylevel" not in filters:
+            filters["hierarchylevel"] = int(lvl.group(1))
+
+        if "value_num" not in filters and mentions_value(question):
+            rng = detect_numeric_range(question, VALUE_KEYWORDS)
+            if rng:
+                filters["value_num"] = rng
+            else:
+                cmp = detect_numeric_comparator(question, VALUE_KEYWORDS)
+                if cmp:
+                    filters["value_num"] = cmp
+
+        date_col, start_dt, end_dt, sort_dir = extract_date_range(question)
+        if date_col not in ORDERABLE_COLUMNS:
+            date_col = "startdate"
+
+        where_clauses, params = build_where(filters, start_dt, end_dt, date_col)
+        where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
+        order_by = f"{date_col} {sort_dir}"
+        query_limit = row_limit
+
+        if start_dt or end_dt:
+            date_clauses = []
+            date_params = []
+
+            if start_dt:
+                date_clauses.append(f"{date_col} >= %s")
+                date_params.append(start_dt.to_pydatetime())
+
+            if end_dt:
+                date_clauses.append(f"{date_col} < %s")
+                date_params.append(end_dt.to_pydatetime())
+
+            where_sql = f"({where_sql}) AND " + " AND ".join(date_clauses)
+            params.extend(date_params)
+
+        if not where_sql:
+            return None
+
+    print("Where SQL is:", where_sql)
+    print("Params are:", params)
+    sql=build_explainable_query(select_sql=select_sql, where_sql=where_sql, order_by=order_by, group_by=group_by)
+    print("Final SQL is:", sql)
+    df=run_query(conn_str, sql, params)
+    print(df.head())
+    yearly_sql=build_yearly_query(dataelement_include=False,where_sql=where_sql)
+    yearly_df=run_query(conn_str, yearly_sql, params)
+    print(yearly_df.head())
+    yearly_dataelement_df=build_yearly_query(dataelement_include=True,where_sql=where_sql)
+    # yearly_dataelement_df=run_query(conn_str, yearly_dataelement_df, params)
+    # print(yearly_dataelement_df.head())
+    insights=build_universal_analysis_payload(df, yearly_df)
+    print("Insights are:", insights)
+
+    return explain_query( insights,question, hf_token)
+
 def answer_question(question: str, debug: bool = False, page: int = 1, page_size: int = 100, include_insights: bool=False, include_rows:bool=True) -> dict:
     row_limit = int(os.environ.get("ROW_LIMIT", "400"))
 
@@ -1645,40 +2406,90 @@ def answer_question(question: str, debug: bool = False, page: int = 1, page_size
     columns_list = ", ".join(sorted(BASE_COLUMNS))
     today_str = date.today().isoformat()
 
-#     classification_prompt = f"""
-# You are a query type classifier.
-# Return ONLY valid JSON.
-# Classify the user question into one of two types:
-# - "normal" → factual data retrieval, filtering, summary, ranking
-# - "explanation" → questions asking why, cause, reason, trend interpretation, spike analysis
-# Output format:
-# {{
-#   "query_type": "normal" or "explanation"
-# }}
-# Rules:
-# - If the question contains words like:
-#   why, cause, reason, explain, trend, increase, decrease, spike, pattern, growth
-#   classify as "explanation".
-# - Otherwise classify as "normal".
-# Question:
-# {question}
-# JSON:
-#     """.strip()
-#     clssification_instr=get_cached_llm_plan("Instruct",classification_prompt, hf_token)
-#     decoded = json.dumps(clssification_instr)
+    classification_prompt = f"""
+You are a STRICT query classifier for a DHIS2 health analytics system.
+CRITICAL:
+Return ONLY valid JSON.
+No explanation.
+No markdown.
+No extra text.
+Task:
+Classify whether the user question requires:
+- "normal" → factual data retrieval (numbers, lists, counts, simple filters, ranking without interpretation)
+- "explainable" → analysis, reasoning, trends, causes, interpretation, or analytical discussion
 
-#     clssification_instr: Dict[str, Any] = {}
-#     m = re.search(r"\{[\s\S]*\}", decoded)
-#     if m:
-#         try:
-#             clssification_instr = json.loads(m.group())
-#         except Exception:
-#             clssification_instr = {}
-#     if clssification_instr.get("query_type")=="normal":
-    return normal_query_answer(question, row_limit, conn_str, hf_token, columns_list, today_str, debug, page, page_size, include_insights, include_rows)
-    # elif clssification_instr.get("query_type")=="explanation":
-    #     return None
+Output format:
+{{
+"classification": "normal" or "explainable",
+"reason": "short reason (max 10 words)"
+}}
 
+Classification rules:
+
+NORMAL queries include:
+- counts
+- lists
+- filters
+- specific values
+- simple aggregation
+- ranking questions without explanation intent
+
+Examples:
+"How many measles cases in 2015"
+"Show malaria cases in Moyowa MCHP"
+"List facilities with TB cases"
+"Which organisation had the most malaria cases in 2015"
+"What is the highest value in 2022"
+
+EXPLAINABLE queries include:
+- why
+- reason
+- explain
+- trend
+- increase/decrease
+- comparison with interpretation
+- outbreak analysis
+- performance analysis
+- requests for interpretation or reasoning
+
+Examples:
+"Why was there measles outbreak in 2015"
+"Explain malaria increase in Kenema"
+"Why are cases higher in 2016"
+"Is there a trend in measles cases"
+"Why is Red Cross reporting more cases"
+"Compare malaria trends between 2015 and 2016"
+
+Decision rules:
+- If the user asks ONLY for data → normal
+- If the user asks for explanation, reasoning, trend, interpretation, or analytical discussion → explainable
+- Ranking questions (most, highest, top, lowest) without explicit explanation words are NORMAL.
+- Only classify as explainable if interpretation is explicitly requested.
+
+User question:
+{question}
+
+JSON:
+    """.strip()
+    clssification_instr=get_cached_llm_plan("Instruct",classification_prompt, hf_token)
+    print("Classification instruction is ",clssification_instr)
+    decoded = json.dumps(clssification_instr)
+    clssification_instr: Dict[str, Any] = {}
+    m = re.search(r"\{[\s\S]*\}", decoded)
+    if m:
+        try:
+            clssification_instr = json.loads(m.group())
+        except Exception:
+            clssification_instr = {}
+    if clssification_instr.get("classification")=="normal":
+        return normal_query_answer(question, row_limit, conn_str, hf_token, columns_list, today_str, debug, page, page_size, include_insights, include_rows)
+    elif clssification_instr.get("classification")=="explainable":
+        answer= explainable_query_answer(question, row_limit, conn_str, hf_token, columns_list, today_str, debug)
+        return {
+            "view": "explainable",
+            "answer": answer,
+            "insights_available": False
+        }
 
 def main():
     question = input("\nEnter your question: ").strip()
