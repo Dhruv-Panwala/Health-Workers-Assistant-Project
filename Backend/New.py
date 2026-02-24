@@ -4,7 +4,6 @@ import re
 from calendar import monthrange
 from datetime import date
 from typing import Any, Dict, List, Tuple
-import tiktoken
 import pandas as pd
 import math
 import numpy as np
