@@ -4,6 +4,7 @@ import re
 from calendar import monthrange
 from datetime import date
 from typing import Any, Dict, List, Tuple
+from fastapi import params
 import pandas as pd
 import math
 import numpy as np
@@ -1372,13 +1373,13 @@ def build_analysis_payload(
     # -------------------------
     # YEARLY COMPARISON (IF AVAILABLE)
     # -------------------------
-    if yearly_df is not None and not yearly_df.empty:
+    if  len(yearly_df)>1:
         ydf = yearly_df.copy()
         ydf["total_value"] = pd.to_numeric(ydf["total_value"], errors="coerce")
         ydf = ydf.sort_values("year")
 
-        ydf["pct_change"] = ydf["total_value"].pct_change()
-
+        ydf["pct_change"] = yearly_df["total_value"].pct_change().iloc[-1]
+        print("pct change is ", ydf["pct_change"])
         payload["yearly_analysis"] = {
             "years_present": ydf["year"].tolist(),
             "yearly_totals": ydf["total_value"].tolist(),
@@ -1387,14 +1388,114 @@ def build_analysis_payload(
 
     return payload
 
+def build_indicator_analysis_payload(df, yearly_df):
+
+    summary = (
+        df.groupby("dataelement")["total_value"]
+        .sum()
+        .sort_values(ascending=False)
+        .reset_index()
+    )
+
+    total_sum = summary["total_value"].sum()
+
+    indicators = summary.to_dict(orient="records")
+
+    dominant = summary.iloc[0] if not summary.empty else None
+
+    payload = {
+        "analysis_type": "indicator_comparison",
+        "data_summary": {
+            "total_across_indicators": float(total_sum),
+            "indicator_count": len(summary),
+        },
+        "indicator_distribution": indicators,
+        "dominant_indicator": {
+            "name": dominant["dataelement"],
+            "value": float(dominant["total_value"])
+        } if dominant is not None else None
+    }
+
+    return payload
+
+def build_summary_analysis_payload(df, yearly_df=None):
+    """
+    Builds analysis payload for summary view:
+    dataelement_name | total_value
+
+    Returns structured JSON-ready dictionary.
+    """
+
+    required_cols = {"dataelement_name", "total_value"}
+
+    if not required_cols.issubset(df.columns):
+        return {"error": "Invalid summary dataframe structure"}
+
+    # Defensive copy
+    df = df.copy()
+
+    # Ensure numeric
+    df["total_value"] = pd.to_numeric(df["total_value"], errors="coerce")
+
+    # Drop completely empty totals
+    df = df.dropna(subset=["total_value"])
+
+    if df.empty:
+        return {"error": "No valid numeric values found"}
+
+    # Sort descending
+    df = df.sort_values("total_value", ascending=False).reset_index(drop=True)
+
+    total_sum = df["total_value"].sum()
+    mean_value = df["total_value"].mean()
+    max_row = df.iloc[0]
+    min_row = df.iloc[-1]
+
+    # Contribution percentages
+    df["percentage_contribution"] = (
+        df["total_value"] / total_sum * 100
+    ).round(2)
+
+    payload = {
+        "view_type": "summary",
+        "total_indicators": int(len(df)),
+        "grand_total": float(total_sum),
+        "average_value": float(mean_value),
+        "top_performer": {
+            "dataelement_name": max_row["dataelement_name"],
+            "value": float(max_row["total_value"]),
+            "contribution_percent": float(df.iloc[0]["percentage_contribution"])
+        },
+        "lowest_performer": {
+            "dataelement_name": min_row["dataelement_name"],
+            "value": float(min_row["total_value"]),
+            "contribution_percent": float(df.iloc[-1]["percentage_contribution"])
+        },
+        "ranking": df.to_dict(orient="records")
+    }
+
+    return payload
+
 def build_universal_analysis_payload(df, yearly_df):
-    columns = set(df.columns)
 
-    if "startdate" in columns:
-        return build_analysis_payload(df,yearly_df)
+    df_cols = set(df.columns)
+    yearly_cols = set(yearly_df.columns) if yearly_df is not None else set()
 
-    elif "orgunit_name" in columns:
-        return build_ranking_analysis_payload(df,yearly_df)
+    # Records view
+    if "startdate" in df_cols:
+        return build_analysis_payload(df, yearly_df)
+
+    # Ranking view
+    elif "orgunit_name" in df_cols:
+        return build_ranking_analysis_payload(df, yearly_df)
+
+    # Summary-only view
+    elif {"dataelement_name", "total_value"} <= df_cols:
+        return build_summary_analysis_payload(df, yearly_df)
+
+    # Explainable yearly view
+    elif "year" in yearly_cols:
+        return build_indicator_analysis_payload(df, yearly_df)
 
     else:
         return {"error": "Unsupported dataframe structure"}
@@ -1423,38 +1524,36 @@ STRICT CONSTRAINTS:
 - Do NOT fabricate causes.
 - Do NOT claim causation.
 - Use neutral analytical language (e.g., "may indicate", "suggests", "is associated with").
-- Do NOT reference SQL, models, prompts, or system design.
-- If no meaningful patterns exist, explicitly state that no strong signal was detected.
+- Do NOT reference SQL, models, prompts, system design, or technical processes.
+- Do NOT mention missing data, null values, NaN values, or unavailable fields.
+- Do NOT explain what cannot be determined.
+- Describe only the patterns that are supported by the provided data.
+- Never return JSON.
+- Always produce a narrative response.
+- Minimum 3 sentences.
 
 REQUIRED OUTPUT FORMAT:
 Write 1–3 well-structured paragraphs.
 
-Structure:
+Structure Guidelines:
 
 Paragraph 1:
-Describe overall magnitude and temporal trend using data_summary and monthly_analysis.
+Describe the overall magnitude and distribution using the values in "insights".
+Include grand total, relative contributions, ranking, and differences between indicators where applicable.
 
 Paragraph 2:
-If anomaly_detection indicates spikes, describe:
-- Number of spikes
-- Months of spikes
-Interpret them as abnormal temporal deviations.
+If anomaly_detection.spike_count > 0, describe the spikes and months.
+If spike_count = 0, simply state that no abnormal temporal spikes were detected.
+Do not add any additional commentary.
 
-Paragraph 3 (only if yearly_analysis exists):
-Describe year-over-year change direction and magnitude.
-If change is small, state that inter-annual variation is minimal.
-
-IMPORTANT:
-- If spike_count > 0, you MUST mention it.
-- If yearly data exists, you MUST mention whether totals increased, decreased, or remained stable.
-- Always produce a narrative response.
-- Never return empty output.
-- Never return JSON.
-- Do not output placeholders.
+Paragraph 3:
+If yearly totals are provided for multiple years, describe the direction of change (increase, decrease, or relatively stable) based on the totals.
+Compare years directly using the numeric values.
+Do not discuss computation limitations.
+If only one year is present, omit this paragraph.
 
 Write clearly for public health workers.
 Be concise but complete.
-Your response must contain at least 3 sentences.
 """
     print("Sending explanation prompt to LLM...")   
     explanation=run_instruct_llm_prompt( explanation_prompt, hf_token, payload=final_payload,payload_include=True)
@@ -1502,6 +1601,24 @@ def detect_intent(question: str):
 
     return "auto"
 
+def build_distinct_dataelement_query(metrics):
+    if not metrics:
+        return None, None
+
+    cleaned = [m.strip() for m in metrics if m and m.strip()]
+    if not cleaned:
+        return None, None
+
+    patterns = [f"%{m}%" for m in cleaned]
+
+    sql = """
+        SELECT DISTINCT name AS dataelement_name
+        FROM dataelement
+        WHERE name ILIKE ANY(%s)
+        ORDER BY name;
+    """
+
+    return sql.strip(), [patterns]
 
 def auto_group_where(where_sql: str) -> str:
 
@@ -1541,66 +1658,78 @@ def auto_group_where(where_sql: str) -> str:
 
 def normal_query_answer(question: str, row_limit: int, conn_str: str, hf_token: str, columns_list: list, today_str: date, debug: bool = False, page: int = 1, page_size: int = 100, include_insights: bool = False, include_rows: bool = True)->dict:
     intent_prompt = f"""
-You are a strict information extraction from engine for DHIS2 health facility data.
-CRITICAL:
+You are a strict information extraction engine for DHIS2 health facility data.
+CRITICAL RULES:
 Return ONLY valid JSON.
 Do NOT include explanations.
 Do NOT include markdown.
 Do NOT include any text outside JSON.
-Output format:
+Output must be syntactically valid JSON.
+All lists must be arrays.
+If a field is missing, return None (not empty string, not empty list).
+Required Output Format:
 {{
-  "orgunit": "List of String",
-  "metric": "List of String"
+"orgunit": ["string"] | None,
+"metric": ["string"] | None
 }}
 Domain Definitions:
 Organisation Unit (orgunit):
-A health facility or reporting unit such as: hospital, clinic, health center, medical center, MCHP, CHC, district hospital
-Examples: "Moyowa MCHP", "Bo Government Hospital", "Kenema Clinic"
+A named health facility or reporting unit explicitly written in the question.
+Examples: Moyowa MCHP, Bo Government Hospital, Kenema Clinic, Red Cross, Loreto
 Metric:
-A health indicator, service, disease, test, or commodity such as:
--Diseases: malaria, TB, HIV, measles
--Services: vaccinations, deliveries, OPD visits
--Commodities: zinc ,ORS, bed nets, vaccines
--Indicators:cases, doses given,tests done,clients treated
-Extraction Rules:
-1. Extract ONLY values explicitly present in question
-2. If there are multiple orgunit name or multiple orgunit names add them all.
-3. Never add words like "organisation", "hospital", "clinic", "center" if not explicitly present in question. Only extract the exact orgunit name mentioned.
-4. Never add words like "cases", "tests", "given", "done" if not explicitly present in question. Only extract the exact metric name mentioned.
-5. NEVER invent orgunit
-6. NEVER invent metric
-7. If missing, return empty None
-8. Preserve original wording
-9. Do NOT combine fields
-10. Do NOT guess
+A health-related term explicitly written in the question referring to:
+Disease (e.g., malaria, TB, HIV, measles)
+Service (e.g., vaccinations, deliveries, OPD visits)
+Commodity (e.g., zinc, ORS, bed nets, vaccines)
+Indicator word if explicitly written together (e.g., "Malaria positive")
+Strict Extraction Rules:
+Extract ONLY exact text spans that appear in the question.
+Preserve original casing and wording exactly as written.
+Do NOT normalize text.
+Do NOT infer missing words.
+Do NOT add indicator words.
+Example: If question says "malaria cases","malaria outbreak", extract "malaria".
+Do NOT extract "malaria cases", "malaria outbreaks".
+Do NOT invent organisation units.
+Do NOT invent metrics.
+Do NOT merge separate entities into one.
+If multiple orgunits exist, return all as separate list items.
+If no orgunit is explicitly mentioned, return:
+"orgunit": null
+If no metric is explicitly mentioned, return:
+"metric": null
+Never guess abbreviations.
+Ignore time references (years, months, periods).
+Ignore aggregation words (most, total, highest, etc.).
+Ignore filter intent words (in, for, of, from, related to, etc.).
 Examples:
 Question:
-How many malaria cases in Moyowa MCHP?
+Which organisation has most measles outbreak in 2015?
 Output:
 {{
-  "orgunit": ["Moyowa MCHP"],
-  "metric": ["malaria"]
+"orgunit": None,
+"metric": ["measles"]
 }}
 Question:
-Show zinc given in Bo Government Hospital
+Compare malaria positive cases between Moyowa MCHP and Bo Government Hospital in 2021
 Output:
 {{
-  "orgunit": ["Bo Government Hospital"],
-  "metric": ["zinc"]
+"orgunit": ["Moyowa MCHP","Bo Government Hospital"],
+"metric": ["malaria positive"]
 }}
 Question:
-What cases for red cross, loreto and Bumban MCHP related to were malaria positive and Measles in 2016
+What cases for Red Cross, Loreto and Bumban MCHP related to were malaria positive and Measles in 2016
 Output:
 {{
-  "orgunit": ["Red Cross","Loreto","Bumban MCHP"],
-  "metric": ["Malaria positive", "Measles"]
+"orgunit": ["Red Cross", "Loreto", "Bumban MCHP"],
+"metric": ["malaria positive", "Measles"]
 }}
 Question:
-Show data for Moyowa MCHP
+Trend of TB cases in Kenema Clinic from 2018 to 2022
 Output:
 {{
-  "orgunit": ["Moyowa MCHP"],
-  "metric": None
+"orgunit": ["Kenema Clinic"],
+"metric": ["TB"]
 }}
 Now extract from:
 Question:
@@ -1621,11 +1750,28 @@ JSON:
             intent_json = {}
     intent_json= normalize_metrics(intent_json)
     print(intent_json)
+    distinct_metric_df = list()
+    if intent_json.get("metric") is not None:
+        intent_json["metric"] = [m.strip() for m in intent_json["metric"] if m and m.strip()]
+        distinct_metric_sql,distinct_metric_params= build_distinct_dataelement_query(intent_json.get("metric"))
+        distinct_metric_df = run_query(conn_str, distinct_metric_sql, distinct_metric_params)
+    print("Distinct metric df is ", distinct_metric_df)
     prompt = f"""
 You are a STRICT Text-to-SQL planner for a PostgreSQL database.
 You must return ONLY a valid JSON object.NO markdown.NO explanation.NO SQL outside JSON.
 You are querying from a CTE named `base` with ONLY these columns:
 {columns_list}
+
+Available valid dataelement_name values (STRICT FILTER LIST):
+{distinct_metric_df}
+
+CRITICAL METRIC FILTERING RULE:
+- You MUST use ONLY values that exist in the provided valid dataelement_name list above.
+- If intent metric is not null, you MUST match it ONLY against items from this list.
+- Never generate a new dataelement_name.
+- Never use partial words not present in the list.
+- If none of the provided values match the intent metric, set where_sql = "FALSE".
+
 Task:
 Given the user’s question, produce a JSON plan with exactly these keys:
 - `select_sql`: SQL select expression for the outer query (do NOT include the word "SELECT"); use "*" for non-aggregated row queries, use aggregate functions like SUM(value_num) AS total_value when aggregation is required, and use only columns available in base.
@@ -1634,92 +1780,123 @@ Given the user’s question, produce a JSON plan with exactly these keys:
 - `group_by`: column name for grouping results (do NOT include the words "GROUP BY"); leave as empty string "" if no grouping is required; any non-aggregated column in select_sql MUST appear here.
 - `order_by`: one of the base columns + ASC or DESC, or an aggregate alias defined in select_sql (e.g., total_value DESC); use only listed base columns or defined aliases.
 - `limit`: integer between 1 and {row_limit}; use 1 for ranking queries like “most” or “highest”, otherwise default to {row_limit}.
+
 Intent for metric and orgunit are preclassified. They are:
 orgunits-{intent_json["orgunit"]}
 metrics-{intent_json["metric"]}
+
 Follow this reasoning process:
-1. Only use dataelement_name in WHERE clause if the intent metric is not ""
+
+1. Only use dataelement_name in WHERE clause if the intent metric is not "".
+   - When filtering by metric, select ONLY matching values from the provided valid dataelement_name list.
+   - If multiple valid matches exist, include each as separate:
+     (dataelement_name ILIKE %s OR dataelement_name ILIKE %s)
+   - ALWAYS wrap metric OR conditions in parentheses.
+
 2. Only use orgunit_name in WHERE clause if the intent orgunit is not "".
+   - If multiple orgunits exist:
+     (orgunit_name ILIKE %s OR orgunit_name ILIKE %s)
+   - NEVER use AND between multiple orgunit_name.
+   - ALWAYS wrap orgunit OR conditions in parentheses.
+
 3. Identify any date/time filters (e.g. last 3 months, in 2016).
 → Use startdate >= %s AND startdate < %s for filtering.
-4. Identify follow-up status intent phrases meaning completed/maintained/flagged/reviewed → followup IS TRUE while phrases meaning not followed up/pending/unresolved/missing → followup IS FALSE
+
+4. Identify follow-up status intent phrases meaning completed/maintained/flagged/reviewed → followup IS TRUE
+   while phrases meaning not followed up/pending/unresolved/missing → followup IS FALSE
 → if mentioned, include filter: followup = %s
+
 5. Identify sorting direction (e.g. latest → DESC).
+
 Extract the exact date and time from the following phrases and return in ISO format:
 - “last X days” → compute today minus X days to today
 - “last month” → from 1st of previous month to 1st of current month
 - “in 2022” → "2022-01-01" to "2023-01-01"
+
 6. Logical grouping rules (CRITICAL):
 - Conditions on the SAME column must be grouped together using parentheses and combined using OR.
 - Conditions on DIFFERENT columns must be combined using AND.
 - ALWAYS wrap OR groups in parentheses.
+
 Examples:
 Multiple facilities:
 (orgunit_name ILIKE %s OR orgunit_name ILIKE %s)
-Note: Never use AND between multiple orgunit_name
+
 Multiple metrics:
 (dataelement_name ILIKE %s OR dataelement_name ILIKE %s)
+
 Combined:
 (org filters) AND (metric filters) AND date filters
+
 Aggregation Rules:
 - If the question asks:
 "which organisation", "which facility", "most", "highest",
 "lowest", "top", "least", "maximum", "minimum"
 THEN aggregation is required.
+
 - For organisation ranking questions:
 select_sql = "orgunit_name, SUM(value_num) AS total_value"
 group_by = "orgunit_name"
 order_by = "total_value DESC"
 limit = 1 (unless user specifies otherwise)
+
 - For general totals without ranking:
 select_sql = "SUM(value_num) AS total_value"
 group_by = ""
 order_by = "total_value DESC"
+
 - If no aggregation is required:
 select_sql = "*"
 group_by = ""
+
 Hard rules:
-- If there are multiple metrics in intent then add all of them as seperate "dataelement_name ILIKE %s" and join them with OR
-- If there are multiple metrics in intent then add all of them as seperate "orgunit_name ILIKE %s" and join them with OR
+- If there are multiple metrics in intent then add all matched valid dataelement_name values separately as "dataelement_name ILIKE %s" and join them with OR inside parentheses.
+- If there are multiple orgunits in intent then add all of them as separate "orgunit_name ILIKE %s" and join them with OR inside parentheses.
 - Use ONLY the listed columns. Do not invent column names.
-- Never put values directly into where sql instead add %s in wheresql and add values in params.
+- Never put values directly into where_sql instead add %s in where_sql and add values in params.
 - If group_by is not empty, select_sql MUST include aggregate functions.
 - If aggregate alias is used (e.g., total_value), order_by MUST use the alias and NEVER use startdate ordering.
 - Never mix aggregated and non-aggregated columns unless included in group_by.
 - Do not invent column names. Use value_num for aggregation.
 - Do not use semicolons, joins, subqueries, or multiple statements.
-- Prefer ILIKE(Full caps) for text matching.
+- Prefer ILIKE for text matching.
 - If user requests a time period, filter using startdate: startdate >= %s AND startdate < %s
-- If aggregation is NOT required and user asks “latest/recent”, order by startdate DESC. If user asks “oldest/earliest”, order by startdate ASC.
+- If aggregation is NOT required and user asks “latest/recent”, order by startdate DESC.
+- If user asks “oldest/earliest”, order by startdate ASC.
 - NEVER output mixed AND/OR without parentheses.
-- Every OR group MUST be inside brackets
-- If you are unsure or the user question is vague or chit chat intentsion use where_sql="FALSE".
+- Every OR group MUST be inside brackets.
+- If you are unsure or the user question is vague or chit chat intention use where_sql="FALSE".
 - Never return empty JSON always return a valid JSON plan.
+
 So Return EXACTLY this:
 {{ "where_sql": "FALSE", "params": [], "order_by": "startdate DESC", "limit": 1}}
+
 Today’s date is: {today_str}
+
 Example 1:
 User question:
 Show records from Loreto Clinic related to malaria cases between Jan to April 2016
 {{
 "select_sql": "*",
 "where_sql": "orgunit_name ILIKE %s AND dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
-"params": ["%Loreto Clinic%", "%malaria%","2016-01-01", "2016-04-01"],
+"params": ["%Loreto Clinic%", "%malaria positive%","2016-01-01", "2016-04-01"],
 "group_by": "",
 "order_by": "startdate DESC",
 "limit": 200
 }}
+
 Example 2:
 User question:
 Show records of malaria with non followed up cases in first 75 days of 2016
 {{
 "select_sql": "*",
-"where_sql": "dataelement_name ILIKE %s AND followup = %s AND startdate >= %s AND startdate < %s",
-"params": ["%malaria%", FALSE,"2016-01-01", "2016-03-16"],
+"where_sql": "(dataelement_name ILIKE %s) AND followup = %s AND startdate >= %s AND startdate < %s",
+"params": ["%malaria positive%", FALSE,"2016-01-01", "2016-03-16"],
 "group_by": "",
 "order_by": "startdate DESC",
 "limit": 200
 }}
+
 Example 3:
 User question:
 How many red cross clinic patients were affected by malaria negative related results in 2015
@@ -1731,6 +1908,7 @@ How many red cross clinic patients were affected by malaria negative related res
 "order_by": "total_value DESC",
 "limit": 200
 }}
+
 Example 4:
 User question:
 What are all the cases registered in 2016
@@ -1742,20 +1920,22 @@ What are all the cases registered in 2016
 "order_by": "startdate DESC",
 "limit": 200
 }}
+
 Example 5:
 User question:
 Which organisation reported most measles cases in 2015
 {{
 "select_sql": "orgunit_name, SUM(value_num) AS total_value",
-"where_sql": "dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
-"params": ["%measles%","2015-01-01","2016-01-01"],
+"where_sql": "(dataelement_name ILIKE %s) AND startdate >= %s AND startdate < %s",
+"params": ["%measles confirmed%","2015-01-01","2016-01-01"],
 "group_by": "orgunit_name",
 "order_by": "total_value DESC",
 "limit": 1
 }}
+
 User question:
 {question}
-    """.strip()
+""".strip()
 
     instr = get_cached_llm_plan("SQL",prompt, hf_token)
     print("Instr is ",instr)
@@ -2075,160 +2255,192 @@ JSON:
             intent_json = {}
     intent_json= normalize_metrics(intent_json)
     print(intent_json)
-    prompt=f"""
+    distinct_metric_df = list()
+    if intent_json.get("metric") is not None:
+        intent_json["metric"] = [m.strip() for m in intent_json["metric"] if m and m.strip()]
+        distinct_metric_sql,distinct_metric_params= build_distinct_dataelement_query(intent_json.get("metric"))
+        distinct_metric_df = run_query(conn_str, distinct_metric_sql, distinct_metric_params)
+    print("Distinct metric df is ", distinct_metric_df)
+    prompt = f"""
 You are a STRICT Text-to-SQL planner for a PostgreSQL database.
-You must return ONLY a valid JSON object. NO markdown. NO explanation. NO SQL outside JSON.
-You are querying from a CTE named base with ONLY these columns:
+Return ONLY a valid JSON object.
+NO markdown.
+NO explanation.
+NO additional text.
+You query ONLY from a CTE named `base`
+with ONLY these columns:
 {columns_list}
-Task:
-Given the user’s question, produce a JSON plan with exactly these keys:
-select_sql: SQL select expression for the outer query (do NOT include the word "SELECT"); use "*" for non-aggregated row queries, use aggregate functions like SUM(value_num) AS total_value when aggregation is required, and use only columns available in base.
-where_sql: SQL boolean condition for filtering rows from base (do NOT include the word "WHERE"). Use only %s placeholders for values; do NOT include LIMIT or OFFSET in where_sql.
-params: array of values corresponding to the %s placeholders in where_sql in exact left-to-right order. The planner MUST ensure the number of %s in where_sql equals len(params).
-group_by: column name for grouping results (do NOT include the words "GROUP BY"); leave as empty string "" if no grouping is required; any non-aggregated column in select_sql MUST appear here.
-order_by: one of the base columns + ASC or DESC, or an aggregate alias defined in select_sql (e.g., total_value DESC); use only listed base columns or defined aliases.
-limit: integer between 1 and {row_limit}; use 1 for ranking queries like “most” or “highest”, otherwise default to {row_limit}.
-Intent for metric and orgunit are preclassified. They are:
-orgunits-{intent_json["orgunit"]}
-metrics-{intent_json["metric"]}
-Follow this exact reasoning process (do not deviate):
-Only use dataelement_name in WHERE clause if the intent metric is not empty (not None and not []).
-Only use orgunit_name in WHERE clause if the intent orgunit is not empty (not None and not []).
-Identify any explicit date/time filters in the user question (e.g. "in 2016", "from 2018 to 2022", "last 30 days", "last month") → Always implement as startdate >= %s AND startdate < %s using ISO dates. For relative phrasing compute exact ISO boundaries from today's date {today_str}. The planner must supply both start and exclusive end in params.
-Follow-up filter mapping: completed/maintained/flagged/reviewed → followup = %s with param TRUE; pending/not followed up/unresolved/missing → followup = %s with param FALSE. Only include if the user explicitly mentions follow-up intent.
-Sorting direction: interpret "latest/recent" → startdate DESC; "oldest/earliest" → startdate ASC. Ranking keywords ("most", "highest", "top") imply aggregation and limit = 1 unless user specifies otherwise.
-Date extraction rules (must implement exactly):
-“last X days” → startdate >= (today - X days) AND startdate < (today + 1 day)
-“last month” → startdate >= first day of previous month AND startdate < first day of current month
-“in YYYY” → startdate >= "YYYY-01-01" AND startdate < "YYYY+1-01-01"
-Logical grouping rules (CRITICAL and strict):
--Conditions on the SAME column must be grouped using parentheses and combined with OR: e.g. (orgunit_name ILIKE %s OR orgunit_name ILIKE %s).
--Conditions on DIFFERENT columns must be combined using AND.
--ALWAYS wrap OR groups in parentheses. NEVER output mixed AND/OR without parentheses.
-Aggregation rules (strict):
--If the user question contains any of the keywords: "which organisation", "which facility", "most", "highest", "lowest", "top", "least", "maximum", "minimum" THEN aggregation is required.
--Organisation ranking: select_sql = "orgunit_name, SUM(value_num) AS total_value", group_by = "orgunit_name", order_by = "total_value DESC", limit = 1 (unless user-specified limit).
--General totals without ranking: select_sql = "SUM(value_num) AS total_value", group_by = "", order_by = "total_value DESC".
--No aggregation required: select_sql = "*", group_by = "".
-EXPLAINABLE / CAUSAL OVERRIDE RULE (HIGHEST PRIORITY):
-If the user question contains causal or explanatory language such as:
-"why", "reason", "cause", "outbreak", "spike", "increase", 
-"rise", "drop", "decline", "high in", "low in"
-AND a time boundary is present (e.g., "in 2015", "from 2018 to 2020"):
-THEN ALWAYS treat the query as a time-series analytical query.
-In this case:
-- select_sql = "startdate, SUM(value_num) AS total_value"
-- group_by = "startdate"
-- order_by = "startdate ASC"
-- limit = {row_limit}
-- NEVER group by dataelement_name
-- NEVER group by orgunit_name unless explicitly comparing facilities
+You are provided VALID metric names from the database:
+distinct_metric_list:
+{distinct_metric_df}
+Intent values extracted from user query (LISTS of raw phrases):
+intent_json["metric"] = {intent_json["metric"]}
+intent_json["orgunit"] = {intent_json["orgunit"]}
 
-This rule OVERRIDES generic aggregation and ranking rules.
-OUTBREAK BASELINE EXPANSION RULE:
-If the user question contains outbreak-related or epidemiological deviation language such as:
-"outbreak", "epidemic", "unusual increase", "why high", "spike", "surge"
-AND a specific year is mentioned (e.g., "in 2015"):
-THEN expand the date range to include one full baseline year before the target year.
+Hard constraints (never violate):
+
+1. NEVER use CASE.
+2. NEVER use arithmetic on value_num.
+3. NEVER compute differences.
+4. NEVER inline literal values in where_sql.
+5. ALWAYS use %s placeholders.
+6. The number of %s placeholders MUST equal len(params).
+7. NEVER mix AND/OR without parentheses.
+8. NEVER use AND between multiple dataelement_name filters.
+9. NEVER use AND between multiple orgunit_name filters.
+10. NEVER include columns not listed in base.
+11. If aggregation alias is used (e.g., total_value), order_by MUST use alias.
+12. NEVER order by startdate when using aggregate alias.
+13. Ignore None, "None", or empty entries in intent lists.
+
+Metric resolution (mandatory first step):
+For each phrase in intent_json["metric"]:
+- Find semantic matches in distinct_metric_list.
+- Select ONLY exact names that exist in distinct_metric_list.
+- If multiple match, include ALL.
+- If none match, return fail-safe.
+
+Metric filter format:
+Single:
+dataelement_name ILIKE %s
+
+Multiple:
+(dataelement_name ILIKE %s OR dataelement_name ILIKE %s)
+
+Each param must be:
+"%<Exact Metric Name From distinct_metric_list>%"
+
+Never partially construct metric names.
+Orgunit resolution:
+If intent_json["orgunit"] contains valid entries:
+Single:
+orgunit_name ILIKE %s
+Multiple:
+(orgunit_name ILIKE %s OR orgunit_name ILIKE %s)
+Date rules:
+If user specifies time, always use:
+startdate >= %s AND startdate < %s
+Today:
+{today_str}
+
+Interpret:
+"in YYYY" → YYYY-01-01 , YYYY+1-01-01
+"last X days" → today-X , today+1
+"last month" → first day previous month , first day current month
+
+Aggregation rules:
+
+Aggregation REQUIRED if question contains:
+"which organisation", "which facility",
+"most", "highest", "lowest",
+"top", "maximum", "minimum", "least"
+
+Organisation ranking:
+select_sql = "orgunit_name, SUM(value_num) AS total_value"
+group_by = "orgunit_name"
+order_by = "total_value DESC"
+limit = 1
+
+General total:
+select_sql = "SUM(value_num) AS total_value"
+group_by = ""
+order_by = "total_value DESC"
+
+Non-aggregation:
+select_sql = "*"
+group_by = ""
+order_by = "startdate DESC"
+
+Causal / outbreak override (highest priority):
+
+If question contains:
+"why", "reason", "cause", "outbreak",
+"spike", "increase", "rise",
+"drop", "decline", "high in", "low in"
+
+AND a time boundary:
+
+Then ALWAYS:
+select_sql = "startdate, SUM(value_num) AS total_value"
+group_by = "startdate"
+order_by = "startdate ASC"
+limit = {row_limit}
+
+Outbreak baseline expansion:
+
+If outbreak language AND specific year mentioned:
+Expand range by one full year before.
+
 Example:
-If user says "in 2015"
+"in 2015"
 → startdate >= "2014-01-01"
 → startdate < "2016-01-01"
 
-Rules:
-- Keep group_by = "startdate"
-- Keep select_sql = "startdate, SUM(value_num) AS total_value"
-- order_by = "startdate ASC"
-- limit = {row_limit}
-- DO NOT change grouping to orgunit_name unless explicitly requested.
-- DO NOT expand if user explicitly restricts to exact boundary (e.g., "only 2015 data").
+Logical grouping structure:
 
-This rule overrides standard single-year filtering for outbreak/causal queries.
+Final where_sql must follow:
+(metric_group)
+AND (orgunit_group)
+AND date_filter
+AND followup_filter
 
-Hard rules (enforced):
--If there are multiple metrics in intent add each as dataelement_name ILIKE %s and join with OR inside parentheses.
--If there are multiple orgunits in intent add each as orgunit_name ILIKE %s and join with OR inside parentheses.
--Use ONLY columns from {columns_list}. Do not invent column names.
--Never put literal values directly into where_sql; always use %s and include the literals in params.
--If group_by is not empty, select_sql MUST include aggregate functions for any non-grouped columns.
--If an aggregate alias (e.g., total_value) is used, order_by MUST use that alias; do NOT order by startdate in that case.
--Do not mix aggregated and non-aggregated columns unless the non-aggregated columns are included in group_by.
--Never group by dataelement_name unless the user explicitly asks to compare different metrics.
--Use value_num for aggregation.
--Do not use semicolons, joins, subqueries, or multiple statements.
--Prefer ILIKE for text matching.
--If the user requests a time period, always express it as startdate >= %s AND startdate < %s.
--If aggregation is NOT required and user asks “latest/recent”, order_by = "startdate DESC". If user asks “oldest/earliest”, order_by = "startdate ASC".
--NEVER output mixed AND/OR without parentheses. Every OR group MUST be in parentheses.
--The number of %s placeholders in where_sql MUST match the length of params.
--If you are unsure or the user question is vague or chit-chat, set where_sql = "FALSE" but still return a complete JSON object per the fallback below.
--Always return a valid JSON plan (never empty). If the question is vague or cannot be mapped confidently, return the fallback plan exactly:
-{{ "select_sql": "*", "where_sql": "FALSE", "params": [], "group_by": "", "order_by": "startdate DESC", "limit": 1 }}
-Example 1
-User question:
-Example 1
-User question:
-in 2015 why was there a high measles outbreak? 
-Intent: 
-{{ "orgunit": None, "metric": ["measles"] }} 
-Output: 
-{{ 
-"select_sql": "startdate, SUM(value_num) AS total_value", 
-"where_sql": "dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s", 
-"params": ["%measles%","2014-01-01","2016-01-01"], 
-"group_by": "startdate", 
-"order_by": "startdate ASC", 
-"limit": 200
+Remove empty sections cleanly.
+Every OR group MUST be inside parentheses.
+
+Fail-safe (return exactly this if unsure or no metric match):
+{{
+  "select_sql": "*",
+  "where_sql": "FALSE",
+  "params": [],
+  "group_by": "",
+  "order_by": "startdate DESC",
+  "limit": 1
 }}
 
-Example 2 
+Examples:
+Example 1
 User question:
-Compare malaria positive cases between Moyowa MCHP and Bo Government Hospital in 2021
-Intent:
-{{ "orgunit": ["Moyowa MCHP","Bo Government Hospital"], "metric": ["malaria positive"] }}
+Which organisation reported most malaria confirmed cases in 2016?
 Output:
 {{
-"select_sql": "orgunit_name, SUM(value_num) AS total_value",
-"where_sql": "(orgunit_name ILIKE %s OR orgunit_name ILIKE %s) AND dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
-"params": ["%Moyowa MCHP%","%Bo Government Hospital%","%malaria positive%","2021-01-01","2022-01-01"],
-"group_by": "orgunit_name",
-"order_by": "total_value DESC",
-"limit": 200
+  "select_sql": "orgunit_name, SUM(value_num) AS total_value",
+  "where_sql": "dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
+  "params": ["%Malaria Confirmed Cases%","2016-01-01","2017-01-01"],
+  "group_by": "orgunit_name",
+  "order_by": "total_value DESC",
+  "limit": 1
+}}
+
+Example 2
+User question:
+Compare malaria positive cases between Moyowa MCHP and Bo Government Hospital in 2021
+Output:
+{{
+  "select_sql": "orgunit_name, SUM(value_num) AS total_value",
+  "where_sql": "(orgunit_name ILIKE %s OR orgunit_name ILIKE %s) AND dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
+  "params": ["%Moyowa MCHP%","%Bo Government Hospital%","%Malaria Positive Cases%","2021-01-01","2022-01-01"],
+  "group_by": "orgunit_name",
+  "order_by": "total_value DESC",
+  "limit": {row_limit}
 }}
 
 Example 3
 User question:
-in 2015 why was there a high measles outbreak
-Intent:
-{{ "orgunit": None, "metric": ["measles"] }}
-Output:
-{{
-"select_sql": "startdate, SUM(value_num) AS total_value",
-"where_sql": "dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
-"params": ["%measles%","2014-01-01","2016-01-01"],
-"group_by": "startdate",
-"order_by": "startdate ASC",
-"limit": 200
-}}
+in 2015 why was there a high measles outbreak?
 
-Example 4
-User question:
-What cases for Red Cross, Loreto and Bumban MCHP related to malaria positive and Measles in 2016
-Intent:
-{{ "orgunit": ["Red Cross","Loreto","Bumban MCHP"], "metric": ["malaria positive","Measles"] }}
 Output:
 {{
-"select_sql": "orgunit_name, SUM(value_num) AS total_value",
-"where_sql": "(orgunit_name ILIKE %s OR orgunit_name ILIKE %s OR orgunit_name ILIKE %s) AND (dataelement_name ILIKE %s OR dataelement_name ILIKE %s) AND startdate >= %s AND startdate < %s",
-"params": ["%Red Cross%","%Loreto%","%Bumban MCHP%","%malaria positive%","%Measles%","2016-01-01","2017-01-01"],
-"group_by": "orgunit_name",
-"order_by": "total_value DESC",
-"limit": 200
+  "select_sql": "startdate, SUM(value_num) AS total_value",
+  "where_sql": "dataelement_name ILIKE %s AND startdate >= %s AND startdate < %s",
+  "params": ["%Measles Cases%","2014-01-01","2016-01-01"],
+  "group_by": "startdate",
+  "order_by": "startdate ASC",
+  "limit": {row_limit}
 }}
 
 User question:
 {question}
-    """.strip()
+""".strip()
     instr = get_cached_llm_plan("SQL", prompt, hf_token)
     print("Instr is ", instr)
     decoded = json.dumps(instr)
@@ -2373,16 +2585,20 @@ User question:
     print("Final SQL is:", sql)
     df=run_query(conn_str, sql, params)
     print(df.head())
-    yearly_sql=build_yearly_query(dataelement_include=False,where_sql=where_sql)
+    if "dataelement_name" in df.columns:
+        yearly_sql=build_yearly_query(dataelement_include=True,where_sql=where_sql)
+    else:
+        yearly_sql=build_yearly_query(dataelement_include=False,where_sql=where_sql)
     yearly_df=run_query(conn_str, yearly_sql, params)
+    yearly_df["year"] = yearly_df["year"].astype(int)
     print(yearly_df.head())
-    yearly_dataelement_df=build_yearly_query(dataelement_include=True,where_sql=where_sql)
+    # yearly_dataelement_df=build_yearly_query(dataelement_include=True,where_sql=where_sql)
     # yearly_dataelement_df=run_query(conn_str, yearly_dataelement_df, params)
     # print(yearly_dataelement_df.head())
     insights=build_universal_analysis_payload(df, yearly_df)
     print("Insights are:", insights)
 
-    return explain_query( insights,question, hf_token)
+    return explain_query(insights,question, hf_token)
 
 def answer_question(question: str, debug: bool = False, page: int = 1, page_size: int = 100, include_insights: bool=False, include_rows:bool=True) -> dict:
     row_limit = int(os.environ.get("ROW_LIMIT", "400"))
