@@ -180,7 +180,7 @@ def run_instruct_llm_prompt(prompt: str, token: str,payload: dict={},payload_inc
     
     if payload_include:
         response = client.chat.completions.create(
-        model="meta-llama/Meta-Llama-3-8B-Instruct",
+        model="defog/llama-3-sqlcoder-8b:featherless-ai",
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": json.dumps(payload)}
@@ -190,7 +190,7 @@ def run_instruct_llm_prompt(prompt: str, token: str,payload: dict={},payload_inc
         explanation = response.choices[0].message.content
         return explanation
     completion = client.chat.completions.create(
-        model="meta-llama/Meta-Llama-3-8B-Instruct",
+        model="defog/llama-3-sqlcoder-8b:featherless-ai",
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
     )
