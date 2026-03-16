@@ -23,6 +23,8 @@ function ChatInterface() {
 
   const pageAbortRef = useRef(null);
 
+  const API_URL = "https://health-worker-assistant-project.onrender.com/query";
+
   // store last query to avoid stale updates
   const lastQueryRef = useRef("");
   const hasInsightsPayload = (payload) =>
