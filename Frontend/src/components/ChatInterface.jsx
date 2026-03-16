@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useRef } from "react";
 import ChartsPanel from "./ChartPanel";
 import "./ChatInterface.css";
+import {
+  getOfflineBackendErrorMessage,
+  runQuery,
+} from "../backend/offlinebackend";
 
 function ChatInterface() {
   const [input, setInput] = useState("");
@@ -19,10 +23,10 @@ function ChatInterface() {
 
   const pageAbortRef = useRef(null);
 
-  const API_URL = "https://health-workers-assistant-project.onrender.com/query";
-
   // store last query to avoid stale updates
   const lastQueryRef = useRef("");
+  const hasInsightsPayload = (payload) =>
+    !!payload && typeof payload === "object";
 
   // -------------------------------------------------------
   // MAIN SUBMIT HANDLER
@@ -39,7 +43,6 @@ function ChatInterface() {
     setLoadingInsights(false);
     setError("");
 
-    // reset UI
     setResult(null);
     setInput("");
     setCurrentPage(1);
@@ -47,22 +50,16 @@ function ChatInterface() {
     setShowCharts(false);
 
     try {
-
-      const res = await fetch(API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question: userQuestion,
-          debug: false,
-          page: 1,
-          page_size: rowsPerPage,
-          include_rows: true,
-          include_insights: false,
-        }),
+      const data = await runQuery({
+        question: userQuestion,
+        debug: false,
+        page: 1,
+        page_size: rowsPerPage,
+        include_rows: true,
+        include_insights: false,
       });
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.detail || "Something went wrong");
+      const isExplainable = data.view === "explainable";
 
       setResult({
         question: userQuestion,
@@ -74,35 +71,40 @@ function ChatInterface() {
 
         answer: data.answer || null,
 
-        insights: null,
+        insights: isExplainable ? data.insights || null : null,
       });
 
-      if (data.insights_available) {
+      // ==============================
+      // EXPLAINABLE → Insights already included
+      // ==============================
+      if (isExplainable && hasInsightsPayload(data.insights)) {
+        setInsightsAvailable(true);
+        setShowCharts(true);
+      }
+
+      // ==============================
+      // NON-EXPLAINABLE → Keep old logic
+      // ==============================
+      if (!isExplainable && data.insights_available) {
         setLoadingInsights(true);
 
-        fetch(API_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            question: userQuestion,
-            debug: false,
-            page: 1,
-            page_size: rowsPerPage,
-            include_rows: false,
-            include_insights: true,
-          }),
+        runQuery({
+          question: userQuestion,
+          debug: false,
+          page: 1,
+          page_size: rowsPerPage,
+          include_rows: false,
+          include_insights: true,
         })
-          .then((r) => r.json())
           .then((insightData) => {
             if (lastQueryRef.current !== userQuestion) return;
 
-            if (insightData?.insights) {
+            if (hasInsightsPayload(insightData?.insights)) {
               setResult((prev) =>
                 prev
                   ? {
                       ...prev,
                       insights: insightData.insights,
-                      row_count: prev.row_count,
                     }
                   : prev
               );
@@ -112,7 +114,10 @@ function ChatInterface() {
             }
           })
           .catch((err) => {
-            console.warn("Insights fetch failed:", err);
+            console.warn(
+              "Insights fetch failed:",
+              getOfflineBackendErrorMessage(err)
+            );
           })
           .finally(() => {
             if (lastQueryRef.current === userQuestion) {
@@ -120,8 +125,9 @@ function ChatInterface() {
             }
           });
       }
+
     } catch (err) {
-      setError(err.message || "Failed to fetch API");
+      setError(getOfflineBackendErrorMessage(err));
       setInsightsAvailable(false);
       setShowCharts(false);
     } finally {
@@ -132,12 +138,10 @@ function ChatInterface() {
   useEffect(() => {
     if (!currentQuery) return;
 
-    // Pagination should NOT run for summary mode
     if (result?.view !== "records") return;
 
     const controller = new AbortController();
 
-    // cancel previous request immediately
     if (pageAbortRef.current) {
       pageAbortRef.current.abort();
     }
@@ -149,22 +153,17 @@ function ChatInterface() {
       setError("");
 
       try {
-        const res = await fetch(API_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: controller.signal,
-          body: JSON.stringify({
-            question: currentQuery,
-            debug: false,
-            page: currentPage,
-            page_size: rowsPerPage,
-            include_rows: true,
-            include_insights: false,
-          }),
+        // Native plugin call instead of fetch()
+        const data = await runQuery({
+          question: currentQuery,
+          debug: false,
+          page: currentPage,
+          page_size: rowsPerPage,
+          include_rows: true,
+          include_insights: false,
         });
 
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.detail || "Something went wrong");
+        // Chaquopy returns Python dict → JS object
 
         setResult((prev) =>
           prev
@@ -177,7 +176,7 @@ function ChatInterface() {
         );
       } catch (err) {
         if (err.name !== "AbortError") {
-          setError(err.message || "Failed to fetch API");
+          setError(getOfflineBackendErrorMessage(err));
         }
       } finally {
         setLoadingTable(false);
@@ -188,7 +187,6 @@ function ChatInterface() {
 
     return () => controller.abort();
   }, [currentQuery, currentPage]);
-
   // -------------------------------------------------------
   // UI HELPERS
   // -------------------------------------------------------

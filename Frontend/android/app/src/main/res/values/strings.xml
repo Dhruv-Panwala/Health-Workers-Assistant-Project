@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Health Worker Assistant</string>
+    <string name="title_activity_main">Health Worker Assistant</string>
+    <string name="package_name">com.healthworker.assistant</string>
+    <string name="custom_url_scheme">com.healthworker.assistant</string>
+</resources>

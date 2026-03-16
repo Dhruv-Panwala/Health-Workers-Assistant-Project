@@ -23,7 +23,49 @@ function ChartsPanel({ insights, view }) {
   "#9333ea", 
   "#be123c" 
   ];
-  if (!insights || insights.mode === "none") {
+  const toNumber = (value, fallback = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
+
+  const normalizeInsights = (raw) => {
+    if (!raw || typeof raw !== "object") return null;
+
+    if (raw.mode === "dashboard") {
+      return {
+        ...raw,
+        cards: {
+          total: toNumber(raw?.cards?.total, 0),
+          metrics: toNumber(raw?.cards?.metrics, 0),
+          orgs: toNumber(raw?.cards?.orgs, 0),
+        },
+        charts: Array.isArray(raw?.charts) ? raw.charts : [],
+      };
+    }
+
+    // Legacy / raw analytics payload fallback
+    if (raw.data_summary || raw.monthly_analysis || raw.yearly_analysis || raw.anomaly_detection) {
+      return {
+        mode: "dashboard",
+        cards: {
+          total: toNumber(raw?.data_summary?.overall_sum, 0),
+          metrics: 1,
+          orgs: 1,
+        },
+        charts: [],
+      };
+    }
+
+    return {
+      mode: "dashboard",
+      cards: { total: 0, metrics: 0, orgs: 0 },
+      charts: [],
+    };
+  };
+
+  const normalizedInsights = normalizeInsights(insights);
+
+  if (!normalizedInsights || normalizedInsights.mode === "none") {
     return (
       <div className="charts-panel">
         <div className="chart-card">
@@ -56,7 +98,7 @@ function ChartsPanel({ insights, view }) {
         <div className="kpi-card">
           <div className="kpi-label">Total</div>
           <div className="kpi-value">
-            {Math.floor(cards.total).toLocaleString()}
+            {Math.floor(toNumber(cards.total, 0)).toLocaleString()}
           </div>
         </div>
 
@@ -77,20 +119,22 @@ function ChartsPanel({ insights, view }) {
   // Render Bar Chart List
   // -----------------------------
   const renderBars = (chart) => {
-    const data = chart.data || [];
-    const maxValue = Math.max(...data.map((d) => d.total)) || 1;
+    const data = Array.isArray(chart.data) ? chart.data : [];
+    const totals = data.map((d) => toNumber(d.total, 0));
+    const maxValue = Math.max(1, ...totals);
 
     return (
       <div className="chart-scroll">
         {data.map((item, idx) => {
-          const pct = Math.max(2, (item.total / maxValue) * 100);
+          const total = toNumber(item.total, 0);
+          const pct = Math.max(2, (total / maxValue) * 100);
 
           return (
             <div className="bar-row" key={idx}>
               <div className="bar-row-top">
                 <span className="bar-label">{item.name}</span>
                 <span className="bar-value">
-                  {Math.floor(item.total).toLocaleString()}
+                  {Math.floor(total).toLocaleString()}
                 </span>
               </div>
 
@@ -111,10 +155,10 @@ function ChartsPanel({ insights, view }) {
   // Render Single Line Trend
   // -----------------------------
   const renderTrend = (chart) => {
-    const formatted = (chart.data || []).map((d) => ({
+    const formatted = (Array.isArray(chart.data) ? chart.data : []).map((d) => ({
       ...d,
       dateLabel: formatMonth(d.date),
-      total: Math.floor(d.total || 0)
+      total: Math.floor(toNumber(d.total, 0))
     }));
 
     return (
@@ -123,7 +167,7 @@ function ChartsPanel({ insights, view }) {
           <CartesianGrid strokeDasharray="3 3" />
           <XAxis dataKey="dateLabel" />
           <YAxis allowDecimals={false} />
-          <Tooltip formatter={(v) => v.toLocaleString()} />
+          <Tooltip formatter={(v) => toNumber(v, 0).toLocaleString()} />
           <Line type="monotone" dataKey="total" strokeWidth={2} dot={{ r: 3 }} />
         </LineChart>
       </ResponsiveContainer>
@@ -134,14 +178,14 @@ function ChartsPanel({ insights, view }) {
   // Render Multi-Series Trend
   // -----------------------------
   const renderMultiTrend = (chart) => {
-    const series = chart.series || [];
+    const series = Array.isArray(chart.series) ? chart.series : [];
 
     // Flatten all dates
     const merged = {};
     series.forEach((s) => {
-      s.data.forEach((pt) => {
+      (Array.isArray(s.data) ? s.data : []).forEach((pt) => {
         if (!merged[pt.date]) merged[pt.date] = { date: pt.date };
-        merged[pt.date][s.metric] = pt.total;
+        merged[pt.date][s.metric] = toNumber(pt.total, 0);
       });
     });
 
@@ -180,19 +224,22 @@ function ChartsPanel({ insights, view }) {
   // ======================================================
   // DASHBOARD MODE (NEW)
   // ======================================================
-  if (insights.mode === "dashboard") {
+  if (normalizedInsights.mode === "dashboard") {
     return (
       <div className="charts-panel">
         {/* KPI Cards */}
-        {renderCards(insights.cards)}
+        {renderCards(normalizedInsights.cards)}
 
         {/* Charts */}
-        {insights.charts.map((chart, idx) => (
+        {(normalizedInsights.charts || []).map((chart, idx) => (
           <div className="chart-card chart-card-big" key={idx}>
             <div className="chart-title">
               {chart.title}
               {view === "summary" && (
                 <span className="chart-subtitle">(Summary Insights)</span>
+              )}
+              {view === "explainable" && (
+                <span className="chart-subtitle">(Explainable Analysis)</span>
               )}
             </div>
 
@@ -204,6 +251,12 @@ function ChartsPanel({ insights, view }) {
               renderMultiTrend(chart)}
           </div>
         ))}
+        {(!normalizedInsights.charts || normalizedInsights.charts.length === 0) && (
+          <div className="chart-card">
+            <div className="chart-title">Insights</div>
+            <div className="chart-empty">No chartable insight points available.</div>
+          </div>
+        )}
       </div>
     );
   }
@@ -216,7 +269,7 @@ function ChartsPanel({ insights, view }) {
       <div className="chart-card">
         <div className="chart-title">Insights</div>
         <div className="chart-empty">
-          Unsupported insight mode: {insights.mode}
+          Unsupported insight mode: {normalizedInsights?.mode || "unknown"}
         </div>
       </div>
     </div>
