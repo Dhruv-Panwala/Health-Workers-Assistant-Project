@@ -4,8 +4,13 @@
   box-sizing: border-box;
 }
 
-body {
+:root {
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  color: #223044;
+  background: linear-gradient(135deg, #66beea 0%, #584ba2 100%);
+}
+
+body {
   background: linear-gradient(135deg, #66beea 0%, #584ba2 100%);
   min-height: 100vh;
   color: #333;

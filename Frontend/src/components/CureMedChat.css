@@ -1,0 +1,186 @@
+.cure-med-chat {
+  width: 100%;
+  max-width: 1450px;
+  margin: 0 auto;
+  background: #ffffff;
+  border-radius: 18px;
+  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.cure-med-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.cure-med-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cure-med-label {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.cure-med-select {
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  color: #0f172a;
+  font-weight: 700;
+}
+
+.cure-med-clear {
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #0f172a;
+  padding: 10px 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.cure-med-clear:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.cure-med-status {
+  border-radius: 12px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  padding: 12px 14px;
+  font-size: 0.95rem;
+}
+
+.cure-med-transcript {
+  min-height: 420px;
+  max-height: 58vh;
+  overflow-y: auto;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cure-med-empty {
+  margin: auto 0;
+  text-align: center;
+  color: #475569;
+  font-size: 1rem;
+}
+
+.cure-med-bubble {
+  max-width: min(86%, 760px);
+  border-radius: 16px;
+  padding: 12px 14px;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.06);
+}
+
+.cure-med-bubble-user {
+  align-self: flex-end;
+  background: #dbeafe;
+  color: #0f172a;
+}
+
+.cure-med-bubble-assistant {
+  align-self: flex-start;
+  background: #ffffff;
+  color: #0f172a;
+}
+
+.cure-med-role {
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #475569;
+  margin-bottom: 6px;
+}
+
+.cure-med-content {
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+
+.cure-med-error {
+  color: #b91c1c;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.cure-med-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cure-med-input {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 14px;
+  padding: 14px;
+  font: inherit;
+  resize: vertical;
+  min-height: 110px;
+  background: #ffffff;
+  color: #0f172a;
+}
+
+.cure-med-send {
+  align-self: flex-end;
+  border: none;
+  border-radius: 12px;
+  background: #0f766e;
+  color: #ffffff;
+  padding: 12px 18px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.cure-med-send:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+@media (max-width: 768px) {
+  .cure-med-chat {
+    padding: 14px;
+  }
+
+  .cure-med-transcript {
+    min-height: 360px;
+    max-height: none;
+  }
+
+  .cure-med-bubble {
+    max-width: 100%;
+  }
+
+  .cure-med-toolbar {
+    align-items: stretch;
+  }
+
+  .cure-med-toolbar-group {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .cure-med-send {
+    width: 100%;
+  }
+}

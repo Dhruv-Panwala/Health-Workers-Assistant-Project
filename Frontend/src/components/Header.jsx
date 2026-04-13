@@ -8,14 +8,14 @@ function Header() {
         <div className="logo-container">
           <div className="logo">
             <div className="logo-icon">
-              <img src="../../Logos/Otermans Institute.png" alt="Otermans Institute" />
+              <img src="/Logos/Otermans Institute.png" alt="Otermans Institute" />
             </div>
           </div>
 
           <div className="logo">
             <div className="logo-icon">
               <img
-                src="../../Logos/Kenya_medical_training_college.png"
+                src="/Logos/Kenya_medical_training_college.png"
                 alt="Kenya_medical_training_college"
                 className="Kenya_medical_training_college"
               />

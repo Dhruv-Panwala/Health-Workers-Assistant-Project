@@ -1,0 +1,62 @@
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+android {
+    namespace = "com.arm.aichat"
+    compileSdk = rootProject.ext.compileSdkVersion
+    ndkVersion = rootProject.ext.ndkVersion
+
+    defaultConfig {
+        minSdkVersion rootProject.ext.minSdkVersion
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        consumerProguardFiles 'consumer-rules.pro'
+
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DCMAKE_BUILD_TYPE=Release"
+                arguments "-DBUILD_SHARED_LIBS=ON"
+                arguments "-DLLAMA_BUILD_COMMON=ON"
+                arguments "-DLLAMA_OPENSSL=OFF"
+                arguments "-DGGML_NATIVE=OFF"
+                arguments "-DGGML_BACKEND_DL=ON"
+                arguments "-DGGML_CPU_ALL_VARIANTS=ON"
+                arguments "-DGGML_LLAMAFILE=OFF"
+                arguments "-DLLAMA_CPP_ROOT=${file("${rootDir}/../../.vendor/llama.cpp").absolutePath.replace('\\', '/')}"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+            version rootProject.ext.cmakeVersion
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+
+    kotlinOptions {
+        jvmTarget = '21'
+    }
+
+    packagingOptions {
+        resources {
+            excludes += ['/META-INF/{AL2.0,LGPL2.1}']
+        }
+    }
+}
+
+dependencies {
+    implementation "androidx.core:core-ktx:$androidxCoreVersion"
+    implementation "androidx.datastore:datastore-preferences:$androidxDatastorePreferencesVersion"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:$kotlinCoroutinesVersion"
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+}

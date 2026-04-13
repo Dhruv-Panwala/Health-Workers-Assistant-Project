@@ -1,118 +1,71 @@
-# ===============================
-# Python
-# ===============================
-venv/
-.venv/
-env/
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.sqlite3
-*.log
-*.db
+# Local workspace and tool caches
+.android-home/
+.gradle-build*/
+.gradle-home/
+.gradle-local/
+.tmp/
+.vendor/
+.g*/
 
-# dotenv / secrets
-.env
-
-# HuggingFace / sentence-transformers cache
-.cache/
-hf_home/
-huggingface/
-*.bin
-*.pt
-
-# Jupyter
-.ipynb_checkpoints/
-
-# ===============================
-# Node / React frontend
-# ===============================
-node_modules/
-build/
-dist/
-
-# ===============================
-# OS files
-# ===============================
+# OS and editor files
 .DS_Store
 Thumbs.db
-
-# ===============================
-# VS Code / IDE
-# ===============================
-.vscode/
 .idea/
-
-# ===============================
-# Render / misc
-# ===============================
-*.render
-Backend/temp.py
-Backend/temp_codex.py
-Backend/__pycache__/API.cpython-312.pyc
-Backend/__pycache__/New.cpython-312.pyc
-Backend/models/Qwen2.5-0.5B-Instruct-Q4_K_L.gguf
-Backend/models/qwen2.5-3b-instruct-q4_0.gguf
-Backend/models/Qwen2.5-Coder-3B-Q4_K_L.gguf
-Backend/__pycache__/New.cpython-312.pyc
-Backend/__pycache__/API.cpython-312.pyc
-Backend/models/uliza_q4_k_m.gguf
-Backend/try_translator.py
-Backend/updated_codex.py
-Backend/models/llama-3-sqlcoder-8b-Q4_K_M.gguf
-Backend/models/llama-3-sqlcoder-8b-Q5_K_M.gguf
-
-# ===============================
-# Android / Capacitor
-# ===============================
-*.apk
-*.aar
-*.ap_
-*.aab
-*.dex
-*.class
-*.hprof
-bin/
-gen/
-out/
-.gradle/
-proguard/
-.navigation/
-captures/
-.externalNativeBuild
-.cxx/
-local.properties
+.vscode/
 *.iml
-.idea/workspace.xml
-.idea/tasks.xml
-.idea/gradle.xml
-.idea/assetWizardSettings.xml
-.idea/dictionaries
-.idea/libraries
-.idea/caches
-.idea/modules.xml
-.idea/navEditor.xml
-vcs.xml
-freeline.py
-freeline/
-freeline_project_description.json
-fastlane/report.xml
-fastlane/Preview.html
-fastlane/screenshots
-fastlane/test_output
-fastlane/readme.md
-lint/intermediates/
-lint/generated/
-lint/outputs/
-lint/tmp/
-Frontend/.android-home/
-Frontend/.gradle-home/
-Frontend/.tmp/
-capacitor-cordova-android-plugins
-Frontend/android/app/release/
-Frontend/android/app/src/main/assets/public/
-Frontend/android/app/src/main/assets/capacitor.config.json
-Frontend/android/app/src/main/assets/capacitor.plugins.json
-Frontend/android/app/src/main/res/xml/config.xml
-Backend/New (1).py
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.local
+keystore
+*.jks
+*.keystore
+*.p12
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.venv/
+venv/
+env/
+
+# Local databases and model binaries
+*.db
+*.sqlite
+*.sqlite3
+*.gguf
+
+# Frontend dependencies and build output
+/Frontend/node_modules/
+/Frontend/dist/
+/Frontend/.vite/
+/Frontend/npm-debug.log*
+/Frontend/yarn-debug.log*
+/Frontend/yarn-error.log*
+/Frontend/pnpm-debug.log*
+/package-lock.json
+
+# Android/Gradle generated output
+/Frontend/android/.gradle/
+/Frontend/android/.idea/
+/Frontend/android/local.properties
+/Frontend/android/gradle/gradle-daemon-jvm.properties
+/Frontend/android/captures/
+/Frontend/android/build/
+/Frontend/android/**/build/
+/Frontend/android/**/.cxx/
+/Frontend/android/**/.externalNativeBuild/
+/Frontend/android/app/src/main/assets/public/
+/Frontend/android/app/src/main/assets/capacitor.config.json
+/Frontend/android/app/src/main/assets/capacitor.plugins.json
+/Frontend/android/app/src/main/res/xml/config.xml
+/Frontend/android/keystore.properties

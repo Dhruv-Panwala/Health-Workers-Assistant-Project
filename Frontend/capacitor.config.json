@@ -1,5 +1,5 @@
 {
-  "appId": "com.example.app",
-  "appName": "health-worker-mvp",
+  "appId": "com.uliza.healthworker",
+  "appName": "Uliza Health Worker",
   "webDir": "dist"
 }

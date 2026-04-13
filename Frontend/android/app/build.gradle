@@ -1,81 +1,164 @@
-apply plugin: "com.android.application"
-apply plugin: "org.jetbrains.kotlin.android"
-apply plugin: "com.chaquo.python"
+import groovy.json.JsonOutput
+import java.security.MessageDigest
+import java.util.Properties
 
-def filteredAssetsDir = file("$buildDir/filtered-assets/main")
+apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
+apply plugin: 'com.chaquo.python'
 
-tasks.register("prepareFilteredAssets", Copy) {
-    from("src/main/assets") {
-        exclude "models/**"
+def backendRoot = file("$rootDir/../../pocketflow-text2sql")
+def generatedAssetsDir = file("$buildDir/generated/runtime-assets/bundled")
+def generatedPythonDir = file("$buildDir/generated/mobile-python")
+def runtimeAssetNames = [
+    'dhis2.sqlite',
+    'dhis2_analytics.db',
+    'llama-3-sqlcoder-0.5b.gguf',
+    'CURE-MED-1.5B.i1-Q4_K_M.gguf',
+]
+def pythonSyncFiles = [
+    'New.py',
+    'main.py',
+    'flow.py',
+    'nodes.py',
+    'mobile_api.py',
+    'populate_db.py',
+    'pocketflow.py',
+    'utils/call_llm.py',
+    'utils/analytics.py',
+    'utils/__init__.py',
+]
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('keystore.properties')
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+def sha256 = { File file ->
+    MessageDigest digest = MessageDigest.getInstance('SHA-256')
+    file.withInputStream { stream ->
+        byte[] buffer = new byte[1024 * 1024]
+        int read
+        while ((read = stream.read(buffer)) != -1) {
+            digest.update(buffer, 0, read)
+        }
     }
-    into(filteredAssetsDir)
+    digest.digest().collect { String.format('%02x', it) }.join()
+}
+
+tasks.register('syncBundledAssets') {
+    inputs.files(runtimeAssetNames.collect { file("$backendRoot/$it") })
+    outputs.dir(generatedAssetsDir)
+
+    doLast {
+        delete generatedAssetsDir
+        generatedAssetsDir.mkdirs()
+
+        def manifest = [
+            version    : 1,
+            activeDb   : 'dhis2.sqlite',
+            generatedAt: new Date().format("yyyy-MM-dd'T'HH:mm:ssXXX"),
+            assets     : []
+        ]
+
+        runtimeAssetNames.each { assetName ->
+            File sourceFile = file("$backendRoot/$assetName")
+            if (!sourceFile.exists()) {
+                throw new GradleException("Required Android runtime asset is missing: $sourceFile")
+            }
+
+            copy {
+                from sourceFile
+                into generatedAssetsDir
+            }
+
+            manifest.assets << [
+                name     : assetName,
+                sizeBytes: sourceFile.length(),
+                sha256   : sha256(sourceFile),
+            ]
+        }
+
+        file("$generatedAssetsDir/runtime-manifest.json").text =
+            JsonOutput.prettyPrint(JsonOutput.toJson(manifest))
+    }
+}
+
+tasks.register('syncMobilePython') {
+    inputs.files(pythonSyncFiles.collect { file("$backendRoot/$it") })
+    outputs.dir(generatedPythonDir)
+
+    doLast {
+        delete generatedPythonDir
+        generatedPythonDir.mkdirs()
+
+        copy {
+            from backendRoot
+            include pythonSyncFiles
+            into generatedPythonDir
+        }
+    }
 }
 
 android {
-    namespace "com.healthworker.assistant"
-    compileSdk rootProject.ext.compileSdkVersion
-    externalNativeBuild {
-        cmake {
-            path "src/main/cpp/CMakeLists.txt"
-        }
-    }
-    defaultConfig {
-        applicationId "com.healthworker.assistant"
-        minSdkVersion rootProject.ext.minSdkVersion
-        targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-        aaptOptions {
-             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
-             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
-            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
-        }
-        ndk {
-            abiFilters "arm64-v8a"
-        }
-        python {
-            version "3.11"
-            pip {
-                install "numpy==1.26.2"
-                install "pandas==1.5.0"
-                install "python-dotenv==1.0.1"
+    namespace = "com.uliza.healthworker"
+    compileSdk = rootProject.ext.compileSdkVersion
+    ndkVersion = rootProject.ext.ndkVersion
+
+    signingConfigs {
+        if (keystorePropertiesFile.exists()) {
+            release {
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
             }
         }
     }
+
+    defaultConfig {
+        applicationId "com.uliza.healthworker"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 2
+        versionName "1.1"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    aaptOptions {
+        // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+        // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+        ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        noCompress 'gguf', 'sqlite', 'db', 'json'
+    }
+
     sourceSets {
         main {
-            python.srcDir "src/main/python"
-            jniLibs.srcDirs = ["src/main/jniLibs"]
-            assets.srcDirs = [filteredAssetsDir]
+            assets.srcDirs += [generatedAssetsDir]
+            python.srcDirs = [generatedPythonDir]
         }
     }
-    buildTypes {
-        release {
-            minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.debug
-        }
-    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_21
         targetCompatibility JavaVersion.VERSION_21
     }
+
     kotlinOptions {
-        jvmTarget = "21"
+        jvmTarget = '21'
     }
-    packaging {
-        jniLibs {
-            useLegacyPackaging = true
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (keystorePropertiesFile.exists()) {
+                signingConfig signingConfigs.release
+            }
         }
     }
-    androidResources {
-        noCompress += ["gguf", "sqlite"]
-    }
-}
-
-tasks.named("preBuild").configure {
-    dependsOn("prepareFilteredAssets")
 }
 
 repositories {
@@ -89,12 +172,28 @@ dependencies {
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
-    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.24"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:$kotlinCoroutinesVersion"
     implementation project(':capacitor-android')
+    implementation project(':llama-engine')
     testImplementation "junit:junit:$junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
     implementation project(':capacitor-cordova-android-plugins')
+}
+
+chaquopy {
+    defaultConfig {
+        version = "3.12"
+        buildPython "python"
+    }
+}
+
+preBuild.dependsOn 'syncBundledAssets', 'syncMobilePython'
+tasks.matching { it.name.startsWith('merge') && it.name.endsWith('PythonSources') }.configureEach {
+    dependsOn 'syncMobilePython'
+}
+tasks.matching { it.name.startsWith('merge') && it.name.endsWith('Assets') }.configureEach {
+    dependsOn 'syncBundledAssets'
 }
 
 apply from: 'capacitor.build.gradle'

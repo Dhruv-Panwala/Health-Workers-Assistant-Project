@@ -1,5 +1,10 @@
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.10.0'
+}
 include ':app'
 include ':capacitor-cordova-android-plugins'
+include ':llama-engine'
 project(':capacitor-cordova-android-plugins').projectDir = new File('./capacitor-cordova-android-plugins/')
+project(':llama-engine').projectDir = new File('./llama-engine')
 
 apply from: 'capacitor.settings.gradle'
