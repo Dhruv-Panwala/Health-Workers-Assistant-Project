@@ -1,97 +1,109 @@
-# Chat Assistant Restart for Android
+# Health Workers Assistant
 
-This repository contains:
+An offline-first Android analytics assistant that lets health workers ask natural-language questions about DHIS2-style data. The application translates questions into SQL, validates and executes the query against a local SQLite database, and returns structured analytics without requiring a cloud-hosted language model.
 
-- `Frontend/`: the React + Capacitor Android app
-- `Frontend/android/llama-engine/`: the native Android inference module
-- `pocketflow-text2sql/`: the bundled Python runtime, SQLite databases, and GGUF model files used by the app
+This is an analytics prototype, not a clinical decision-support system or a substitute for professional medical judgement.
 
-The current build flow packages the Android app from `Frontend/` and copies runtime assets from `pocketflow-text2sql/` during the Gradle build.
+## What it does
 
-## First-Time Setup
+- Converts natural-language questions into SQLite queries.
+- Uses schema context to produce database-aware SQL.
+- Combines deterministic DHIS2 query templates with local GGUF-model inference.
+- Runs an automated correction loop when a generated query fails.
+- Produces structured analytics payloads for the mobile interface.
+- Packages local model inference and data access into an Android application.
 
-### 1. Clone the repository
+## Architecture
 
-### 2. Install frontend dependencies
+```text
+React + Capacitor interface
+           |
+           v
+Android native integration
+           |
+     +-----+------+
+     |            |
+llama.cpp      Python workflow
+local GGUF     PocketFlow + SQLite
+inference      text-to-SQL + analytics
+```
 
-In powershell run commands:
-1. cd Frontend
-2. npm install
-3. cd ..
+## Technology
 
+- **Mobile UI:** React, Vite, Capacitor and Recharts
+- **Android:** Native Android project with a llama.cpp inference module
+- **Workflow:** Python and PocketFlow
+- **Data:** SQLite with DHIS2-style analytical data
+- **AI:** Local quantised GGUF models for text-to-SQL and answer generation
 
-### 3. Bootstrap `llama.cpp`
+## Repository layout
 
-This creates `.vendor/llama.cpp`, which is required by the Android native module.
+```text
+Frontend/                         React + Capacitor application
+Frontend/android/                 Android project
+Frontend/android/llama-engine/    Native local-inference module
+pocketflow-text2sql/              Python text-to-SQL and analytics workflow
+```
 
-In powershell run command:
+## First-time setup
+
+### Install frontend dependencies
+
+```powershell
+cd Frontend
+npm install
+cd ..
+```
+
+### Bootstrap llama.cpp
+
+```powershell
 .\Frontend\scripts\bootstrap-llama-cpp.ps1
+```
 
-### 4. Verify bundled runtime assets exist
+### Install the optional local Python runtime
 
-The Android build expects these files inside `pocketflow-text2sql/`:
-- `dhis2.sqlite`
-- `dhis2_analytics.db`
-- `llama-3-sqlcoder-0.5b.gguf`
-- `CURE-MED-1.5B.i1-Q4_K_M.gguf`
+```powershell
+cd pocketflow-text2sql
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+cd ..
+```
 
-If any of them are missing, the Android build will fail during `syncBundledAssets`.
+The Android build expects the required SQLite databases and GGUF model assets inside `pocketflow-text2sql/`. See the detailed workflow documentation in [pocketflow-text2sql/README.md](pocketflow-text2sql/README.md).
 
-### 5. Optional: install Python dependencies for local runtime testing
+## Verify the text-to-SQL workflow
 
-This is useful if you want to run the PocketFlow backend locally outside the APK build.
+```powershell
+cd pocketflow-text2sql
+python main.py
+```
 
-In powershell run commands:
-1. cd pocketflow-text2sql
-2. python -m venv .venv
-3. .\.venv\Scripts\Activate.ps1
-4. pip install -r requirements.txt
-5. cd ..
+A custom natural-language question can be passed after the script name:
 
+```powershell
+python main.py "How many organisation units are there at each hierarchy level?"
+```
 
-## Local Verification
+## Build the Android application
 
-To verify the Python runtime locally:
+Create a local signing configuration if one does not already exist:
 
-In powershell run command:
-1. cd pocketflow-text2sql
-2. python main.py
-3. cd ..
-
-## Generate a Release APK
-
-### 1. Create a signing keystore
-
-If you do not already have one:
-
-In powershell run command: 
+```powershell
 .\Frontend\scripts\create-release-keystore.ps1
+```
 
-This creates:
+Build the release APK:
 
-- `Frontend/android/keystore.properties`
-- `Frontend/uliza-release.keystore`
-
-You can also inspect the template at "Frontend/android/keystore.properties.example"
-
-### 2. Build the release APK
-
-In powershell run command: 
+```powershell
 .\Frontend\scripts\build-android.ps1 -Configuration Release
+```
 
+The release APK is written to:
 
-Release APK will be created in : "Frontend\android\app\build\outputs\apk\release\app-release.apk"
+```text
+Frontend/android/app/build/outputs/apk/release/app-release.apk
+```
 
-## Open the Android Project in Android Studio
-
-If you want to inspect or build from Android Studio:
-
-In powershell run command:
-1. cd Frontend
-2. npm run cap -- open android
-
-## Output Paths
-
-- Debug APK: `Frontend\android\app\build\outputs\apk\debug\app-debug.apk`
-- Release APK: `Frontend\android\app\build\outputs\apk\release\app-release.apk`
-
+Signing keys and local credentials must never be committed.
